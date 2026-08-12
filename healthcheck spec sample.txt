@@ -1,0 +1,54 @@
+{
+    "specversion": "1.0",
+    "type": "com.kafka.producer",
+    "source": "/device/program/image-kafka-producer",
+    "id": "7e8f9c3e-4b2a-4d1a-9f3b-2c3e4d5f6a7b",
+    "time": "2024-06-01T12:00:00Z+09:00",
+    "subject": "healthcheck",
+    "datacontenttype": "application/json",
+    "dataschema": "company:schema:healthcheck:1.0",
+    "data": {
+        "sourceInfo": {
+            "systemId": "EQUIPMENT-IMAGE-KAFKA-PRODUCER",
+            "systemName": "Image Kafka Producer",
+            "sourceType": "WINDOWS",
+            "hostname": "producer-host",
+            "ipAddress": "192.168.1.100",
+            "osName": "Windows 10",
+            "osVersion": "10.0.19044",
+            "javaVersion": "1.8.0_202",
+            "programName": "Image Kafka Producer",
+            "programVersion": "1.0.0",
+            "processId": "12345",
+            "instanceId": "instance-001"
+        },
+        "status": {
+            "level": "INFO",
+            "code": "NORMAL",
+            "message": "Kafka producer is running normally."
+        },
+        "heartbeat": {
+            "sequence": 1,
+            "interval": 60,
+            "startedAt": "2024-06-01T12:00:00Z+09:00",
+            "uptimeSec": 3600,
+            "generatedAt": "2024-06-02T12:00:00Z+09:00"
+        },
+        "kafkaInfo": {
+            "topicName": "my_topic",
+            "lastSendSuccessAt": "2024-06-02T11:59:00Z+09:00",
+            "lastSendFailAt": null,
+            "sendSuccessCount": 1000,
+            "sendFailCount": 0
+        },
+        "workInfo": {
+            "lastImageDetectedAt": "2024-06-02T11:58:30Z+09:00",
+            "lastImageSentAt": "2024-06-02T11:58:00Z+09:00"
+        },
+        "errorInfo": {
+            "lastErrorAt": null,
+            "code": null,
+            "lastErrorMessage": null
+        }
+    }
+}
