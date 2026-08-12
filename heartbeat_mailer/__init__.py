@@ -1,0 +1,2 @@
+"""Kafka heartbeat SMTP notifier."""
+
