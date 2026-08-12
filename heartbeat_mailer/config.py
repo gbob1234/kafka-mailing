@@ -67,6 +67,13 @@ class Settings:
     mail_subject_prefix: str
     heartbeat_stale_after_seconds: float
     sqlite_path: str
+    mail_queue_poll_seconds: float
+    mail_max_retry_attempts: int
+    mail_retry_initial_seconds: float
+    mail_retry_max_seconds: float
+    kafka_lag_log_interval_seconds: float
+    kafka_poll_delay_guard_seconds: float
+    stale_guard_recovery_seconds: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -123,6 +130,27 @@ class Settings:
             sqlite_path=os.getenv(
                 "SQLITE_PATH", "heartbeat_state.db"
             ).strip(),
+            mail_queue_poll_seconds=float(
+                os.getenv("MAIL_QUEUE_POLL_SECONDS", "1")
+            ),
+            mail_max_retry_attempts=int(
+                os.getenv("MAIL_MAX_RETRY_ATTEMPTS", "10")
+            ),
+            mail_retry_initial_seconds=float(
+                os.getenv("MAIL_RETRY_INITIAL_SECONDS", "5")
+            ),
+            mail_retry_max_seconds=float(
+                os.getenv("MAIL_RETRY_MAX_SECONDS", "300")
+            ),
+            kafka_lag_log_interval_seconds=float(
+                os.getenv("KAFKA_LAG_LOG_INTERVAL_SECONDS", "60")
+            ),
+            kafka_poll_delay_guard_seconds=float(
+                os.getenv("KAFKA_POLL_DELAY_GUARD_SECONDS", "10")
+            ),
+            stale_guard_recovery_seconds=float(
+                os.getenv("STALE_GUARD_RECOVERY_SECONDS", "30")
+            ),
         )
         if settings.smtp_use_starttls and settings.smtp_use_ssl:
             raise ValueError("SMTP_USE_STARTTLS and SMTP_USE_SSL cannot both be true")
@@ -134,4 +162,21 @@ class Settings:
             raise ValueError("HEARTBEAT_STALE_AFTER_SECONDS must be positive")
         if not settings.sqlite_path:
             raise ValueError("SQLITE_PATH cannot be empty")
+        if settings.mail_queue_poll_seconds <= 0:
+            raise ValueError("MAIL_QUEUE_POLL_SECONDS must be positive")
+        if settings.mail_max_retry_attempts <= 0:
+            raise ValueError("MAIL_MAX_RETRY_ATTEMPTS must be positive")
+        if settings.mail_retry_initial_seconds <= 0:
+            raise ValueError("MAIL_RETRY_INITIAL_SECONDS must be positive")
+        if settings.mail_retry_max_seconds < settings.mail_retry_initial_seconds:
+            raise ValueError(
+                "MAIL_RETRY_MAX_SECONDS must be greater than or equal to "
+                "MAIL_RETRY_INITIAL_SECONDS"
+            )
+        if settings.kafka_lag_log_interval_seconds <= 0:
+            raise ValueError("KAFKA_LAG_LOG_INTERVAL_SECONDS must be positive")
+        if settings.kafka_poll_delay_guard_seconds <= 0:
+            raise ValueError("KAFKA_POLL_DELAY_GUARD_SECONDS must be positive")
+        if settings.stale_guard_recovery_seconds <= 0:
+            raise ValueError("STALE_GUARD_RECOVERY_SECONDS must be positive")
         return settings

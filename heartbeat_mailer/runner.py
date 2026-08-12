@@ -9,11 +9,13 @@ from types import FrameType
 from confluent_kafka import Consumer, KafkaError, KafkaException, Message
 
 from .config import Settings
-from .mailer import SmtpMailer
 from .message import HeartbeatMessage, InvalidHeartbeat
+from .notification_worker import MailNotificationWorker
 from .storage import (
     DeviceStateRepository,
+    NotificationQueueRepository,
     SQLiteDeviceStateRepository,
+    SQLiteNotificationQueueRepository,
 )
 
 
@@ -37,6 +39,8 @@ class HeartbeatNotifier:
         self,
         settings: Settings,
         state_repository: DeviceStateRepository | None = None,
+        notification_repository: NotificationQueueRepository | None = None,
+        notification_worker: MailNotificationWorker | None = None,
     ) -> None:
         """Kafka consumer와 상태 저장소를 초기화하고 기존 상태를 복원한다.
 
@@ -44,6 +48,8 @@ class HeartbeatNotifier:
             settings: Kafka, SMTP, SQLite 및 알림 기준 설정.
             state_repository: 테스트나 PostgreSQL 전환 시 주입할 저장소.
                 지정하지 않으면 설정된 경로의 SQLite 저장소를 생성한다.
+            notification_repository: consumer가 알림을 등록할 영속 큐 저장소.
+            notification_worker: 테스트에서 주입할 별도 SMTP worker.
         반환:
             없음.
         예외:
@@ -64,11 +70,25 @@ class HeartbeatNotifier:
         if settings.kafka_ssl_ca_location:
             consumer_config["ssl.ca.location"] = settings.kafka_ssl_ca_location
         self._consumer = Consumer(consumer_config)
-        self._mailer = SmtpMailer(settings)
         self._state_repository = state_repository or SQLiteDeviceStateRepository(
             settings.sqlite_path
         )
+        self._notification_repository = (
+            notification_repository
+            or SQLiteNotificationQueueRepository(settings.sqlite_path)
+        )
+        self._notification_worker = notification_worker or MailNotificationWorker(
+            settings,
+            SQLiteNotificationQueueRepository(settings.sqlite_path),
+        )
         self._running = True
+        self._last_poll_completed_at = time.monotonic()
+        self._stale_suppressed_until = (
+            self._last_poll_completed_at
+            + settings.stale_guard_recovery_seconds
+        )
+        self._last_stale_guard_log_at = 0.0
+        self._last_lag_log_at = 0.0
         self._devices: dict[str, DeviceState] = {
             state.heartbeat.device_id: DeviceState(
                 heartbeat=state.heartbeat,
@@ -108,21 +128,27 @@ class HeartbeatNotifier:
         signal.signal(signal.SIGINT, self.stop)
         signal.signal(signal.SIGTERM, self.stop)
         self._consumer.subscribe([self._settings.kafka_topic])
+        self._notification_worker.start()
         logger.info("Kafka topic 구독 시작: %s", self._settings.kafka_topic)
 
         try:
             while self._running:
                 record = self._consumer.poll(timeout=1.0)
+                self._observe_poll_delay()
                 if record is None:
                     self._notify_stale_devices()
+                    self._maybe_log_consumer_lag()
                     continue
                 if record.error():
                     self._handle_error(record)
                     continue
                 self._process(record)
                 self._notify_stale_devices()
+                self._maybe_log_consumer_lag()
         finally:
+            self._notification_worker.stop()
             self._consumer.close()
+            self._notification_repository.close()
             self._state_repository.close()
             logger.info("Kafka consumer가 종료되었습니다.")
 
@@ -183,10 +209,16 @@ class HeartbeatNotifier:
             notification = "RECOVERY"
             detail = "장비가 UP 상태로 복구되었습니다."
 
-        if notification and not self._send_with_retry(
-            heartbeat, notification, detail
-        ):
-            return
+        if notification:
+            added = self._notification_repository.enqueue(
+                heartbeat, notification, detail
+            )
+            logger.info(
+                "메일 알림 큐 등록: device=%s type=%s added=%s",
+                heartbeat.device_id,
+                notification,
+                added,
+            )
 
         last_seen_at = time.time()
         state = DeviceState(
@@ -217,8 +249,19 @@ class HeartbeatNotifier:
         입력:
             없음. 메모리에 복원된 모든 장비 상태와 현재 시각을 사용한다.
         반환:
-            없음. 발송 성공 시 메모리와 SQLite의 미수신 알림 여부를 갱신한다.
+            없음. 큐 등록 성공 후 메모리와 SQLite의 미수신 표시를 갱신한다.
         """
+        monotonic_now = time.monotonic()
+        if monotonic_now < self._stale_suppressed_until:
+            if monotonic_now - self._last_stale_guard_log_at >= 10:
+                logger.warning(
+                    "최근 Kafka poll 지연으로 미수신 판정을 보류합니다: "
+                    "remaining=%.1fs",
+                    self._stale_suppressed_until - monotonic_now,
+                )
+                self._last_stale_guard_log_at = monotonic_now
+            return
+
         now = time.time()
         for state in self._devices.values():
             if state.stale_notified:
@@ -231,34 +274,90 @@ class HeartbeatNotifier:
             if elapsed < threshold:
                 continue
             detail = f"마지막 heartbeat 수신 후 {int(elapsed)}초가 지났습니다."
-            if self._send_with_retry(state.heartbeat, "MISSING", detail):
-                self._state_repository.mark_stale(state.heartbeat.device_id)
-                state.stale_notified = True
+            added = self._notification_repository.enqueue(
+                state.heartbeat, "MISSING", detail
+            )
+            self._state_repository.mark_stale(state.heartbeat.device_id)
+            state.stale_notified = True
+            logger.warning(
+                "heartbeat 미수신 알림 큐 등록: device=%s added=%s elapsed=%ss",
+                state.heartbeat.device_id,
+                added,
+                int(elapsed),
+            )
 
-    def _send_with_retry(
-        self, heartbeat: HeartbeatMessage, notification: str, detail: str
-    ) -> bool:
-        """종료 요청 전까지 SMTP 발송을 5초 간격으로 재시도한다.
+    def _observe_poll_delay(self) -> None:
+        """연속 poll 완료 간격을 측정하고 지연 시 미수신 판정을 보류한다.
 
         입력:
-            heartbeat: 발송할 장비 상태 정보.
-            notification: 알림 유형 문자열.
-            detail: 메일에 표시할 상세 설명.
+            없음. monotonic clock의 이전 poll 완료 시각을 사용한다.
         반환:
-            발송 성공 시 ``True``, 종료 요청으로 중단되면 ``False``.
+            없음. 기준 초과 시 보류 종료 시각을 갱신한다.
         """
-        while self._running:
-            try:
-                self._mailer.send_heartbeat(heartbeat, notification, detail)
-                return True
-            except Exception:
-                logger.exception(
-                    "메일 발송 실패; 5초 후 재시도합니다: device=%s type=%s",
-                    heartbeat.device_id,
-                    notification,
+        now = time.monotonic()
+        elapsed = now - self._last_poll_completed_at
+        self._last_poll_completed_at = now
+        if elapsed <= self._settings.kafka_poll_delay_guard_seconds:
+            return
+        self._stale_suppressed_until = max(
+            self._stale_suppressed_until,
+            now + self._settings.stale_guard_recovery_seconds,
+        )
+        logger.warning(
+            "Kafka poll 지연을 감지했습니다. 미수신 판정을 일시 보류합니다: "
+            "delay=%.1fs guard=%.1fs",
+            elapsed,
+            self._settings.stale_guard_recovery_seconds,
+        )
+
+    def _maybe_log_consumer_lag(self) -> None:
+        """설정된 주기마다 현재 할당 partition의 consumer lag를 기록한다.
+
+        입력:
+            없음. consumer assignment, position과 cached watermark를 사용한다.
+        반환:
+            없음. 조회 오류는 warning 로그만 남긴다.
+        """
+        now = time.monotonic()
+        if (
+            now - self._last_lag_log_at
+            < self._settings.kafka_lag_log_interval_seconds
+        ):
+            return
+        self._last_lag_log_at = now
+        try:
+            assignment = self._consumer.assignment()
+            if not assignment:
+                logger.info("Kafka consumer lag: partition이 아직 할당되지 않았습니다.")
+                return
+            positions = self._consumer.position(assignment)
+            lags: list[str] = []
+            total_lag = 0
+            for position in positions:
+                _, high = self._consumer.get_watermark_offsets(
+                    position, cached=True
                 )
-                time.sleep(5)
-        return False
+                lag = max(0, high - max(0, position.offset))
+                total_lag += lag
+                lags.append(f"{position.topic}[{position.partition}]={lag}")
+            logger.info(
+                "Kafka consumer lag: total=%s partitions=%s",
+                total_lag,
+                ", ".join(lags),
+            )
+            if total_lag > 0:
+                self._stale_suppressed_until = max(
+                    self._stale_suppressed_until,
+                    now + self._settings.stale_guard_recovery_seconds,
+                )
+                logger.warning(
+                    "Kafka backlog이 남아 있어 미수신 판정을 보류합니다: "
+                    "lag=%s guard=%.1fs",
+                    total_lag,
+                    self._settings.stale_guard_recovery_seconds,
+                )
+        except Exception:
+            logger.warning("Kafka consumer lag 조회에 실패했습니다.", exc_info=True)
 
     @staticmethod
     def _handle_error(record: Message) -> None:

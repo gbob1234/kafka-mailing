@@ -51,6 +51,30 @@ consumer는 Kafka record key와 CloudEvent의 `data.sourceInfo.instanceId`를 �
 SQLite 접근은 `DeviceStateRepository` 경계 뒤에 분리되어 있습니다. 이후 PostgreSQL로
 전환할 때 동일 메서드를 구현하는 저장소를 추가하고 consumer에 주입하면 됩니다.
 
+## 안전한 알림 처리
+
+SMTP 발송은 Kafka consumer thread에서 실행하지 않습니다. consumer는 필요한 알림을
+SQLite의 `notification_queue`에 기록한 뒤 즉시 다음 heartbeat를 처리하고, 별도
+worker thread가 큐를 읽어 메일을 발송합니다.
+
+- 활성 상태의 동일 장비·알림·상태는 unique index로 중복 등록되지 않습니다.
+- 발송 중 종료된 `SENDING` 작업은 재시작 시 `RETRY`로 복원됩니다.
+- SMTP 실패는 지수형 간격으로 재시도하며 최대 간격과 횟수를 제한합니다.
+- 최대 횟수를 넘긴 작업은 `DEAD`로 남아 원인과 함께 확인할 수 있습니다.
+- consumer lag는 `KAFKA_LAG_LOG_INTERVAL_SECONDS` 주기로 로그에 출력합니다.
+- poll 간격이 비정상적으로 길면 `STALE_GUARD_RECOVERY_SECONDS` 동안 미수신
+  판정을 보류하여 backlog에 있는 정상 heartbeat를 장애로 오판하지 않게 합니다.
+
+```env
+MAIL_QUEUE_POLL_SECONDS=1
+MAIL_MAX_RETRY_ATTEMPTS=10
+MAIL_RETRY_INITIAL_SECONDS=5
+MAIL_RETRY_MAX_SECONDS=300
+KAFKA_LAG_LOG_INTERVAL_SECONDS=60
+KAFKA_POLL_DELAY_GUARD_SECONDS=10
+STALE_GUARD_RECOVERY_SECONDS=30
+```
+
 ## 컨테이너 이미지
 
 이미지에는 실행 명령 `python main.py`가 포함되어 있으므로 Kubernetes에서 별도의
