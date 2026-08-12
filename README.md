@@ -31,6 +31,9 @@ python -m unittest discover -v
 상태만 갱신합니다. 장비가 `WARN`/`UNKNOWN` 상태로 전환될 때, `UP`으로 복구될 때,
 그리고 heartbeat가 일정 시간 들어오지 않을 때만 메일을 발송합니다.
 
+장비별 최신 상태는 기본적으로 `heartbeat_state.db` SQLite 파일에 저장됩니다.
+경로는 `SQLITE_PATH`로 변경할 수 있으며 DB 파일과 WAL 파일은 Git에서 제외됩니다.
+
 ## Kafka SASL_SSL
 
 기본 설정은 9094 포트의 `SASL_SSL` 접속과 consumer group
@@ -41,9 +44,12 @@ python -m unittest discover -v
 160대가 1분마다 heartbeat를 보내는 정도는 단일 consumer로 충분합니다. 다만 운영
 consumer는 Kafka record key와 CloudEvent의 `data.sourceInfo.instanceId`를 장비 ID로
 사용합니다. `HEARTBEAT_STALE_AFTER_SECONDS`와 메시지의 heartbeat interval 3배 중
-큰 값을 미수신 기준으로 사용합니다. 현재 프로세스가 실행된 뒤 한 번 이상 수신한
-장비를 감시하며, 재시작 후 상태 유지와 전체 장비 사전 등록은 이후 DB 편입 시
-추가하는 것이 좋습니다.
+큰 값을 미수신 기준으로 사용합니다. 한 번 이상 수신한 장비는 SQLite에 저장되므로
+프로세스를 재시작해도 마지막 수신 시각, 상태, 미수신 알림 여부가 유지됩니다. 아직
+한 번도 메시지를 받지 않은 장비까지 감시하려면 별도의 전체 장비 목록이 필요합니다.
+
+SQLite 접근은 `DeviceStateRepository` 경계 뒤에 분리되어 있습니다. 이후 PostgreSQL로
+전환할 때 동일 메서드를 구현하는 저장소를 추가하고 consumer에 주입하면 됩니다.
 
 프로듀서가 보내는 Kafka value는 CloudEvents Structured JSON입니다. 현재 프로듀서
 소스의 `data.heartbeat`와 실제 캡처 샘플의 레거시 오타 `data.hearbeat`를 모두

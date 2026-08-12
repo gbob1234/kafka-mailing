@@ -46,6 +46,7 @@ class Settings:
     smtp_use_ssl: bool
     mail_subject_prefix: str
     heartbeat_stale_after_seconds: float
+    sqlite_path: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -89,6 +90,9 @@ class Settings:
             heartbeat_stale_after_seconds=float(
                 os.getenv("HEARTBEAT_STALE_AFTER_SECONDS", "180")
             ),
+            sqlite_path=os.getenv(
+                "SQLITE_PATH", "heartbeat_state.db"
+            ).strip(),
         )
         if settings.smtp_use_starttls and settings.smtp_use_ssl:
             raise ValueError("SMTP_USE_STARTTLS and SMTP_USE_SSL cannot both be true")
@@ -98,4 +102,6 @@ class Settings:
             raise ValueError("SMTP_TO must contain at least one email address")
         if settings.heartbeat_stale_after_seconds <= 0:
             raise ValueError("HEARTBEAT_STALE_AFTER_SECONDS must be positive")
+        if not settings.sqlite_path:
+            raise ValueError("SQLITE_PATH cannot be empty")
         return settings

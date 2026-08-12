@@ -11,6 +11,10 @@ from confluent_kafka import Consumer, KafkaError, KafkaException, Message
 from .config import Settings
 from .mailer import SmtpMailer
 from .message import HeartbeatMessage, InvalidHeartbeat
+from .storage import (
+    DeviceStateRepository,
+    SQLiteDeviceStateRepository,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -25,7 +29,11 @@ class DeviceState:
 
 
 class HeartbeatNotifier:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        state_repository: DeviceStateRepository | None = None,
+    ) -> None:
         self._settings = settings
         consumer_config = {
             "bootstrap.servers": settings.kafka_bootstrap_servers,
@@ -41,8 +49,23 @@ class HeartbeatNotifier:
             consumer_config["ssl.ca.location"] = settings.kafka_ssl_ca_location
         self._consumer = Consumer(consumer_config)
         self._mailer = SmtpMailer(settings)
+        self._state_repository = state_repository or SQLiteDeviceStateRepository(
+            settings.sqlite_path
+        )
         self._running = True
-        self._devices: dict[str, DeviceState] = {}
+        self._devices: dict[str, DeviceState] = {
+            state.heartbeat.device_id: DeviceState(
+                heartbeat=state.heartbeat,
+                last_seen_at=state.last_seen_at,
+                status_signature=state.status_signature,
+                stale_notified=state.stale_notified,
+            )
+            for state in self._state_repository.load_all()
+        }
+        logger.info(
+            "저장된 장비 상태를 불러왔습니다: count=%s",
+            len(self._devices),
+        )
 
     def stop(self, _signum: int, _frame: FrameType | None) -> None:
         logger.info("종료 신호를 받았습니다.")
@@ -67,6 +90,7 @@ class HeartbeatNotifier:
                 self._notify_stale_devices()
         finally:
             self._consumer.close()
+            self._state_repository.close()
             logger.info("Kafka consumer가 종료되었습니다.")
 
     def _process(self, record: Message) -> None:
@@ -93,8 +117,15 @@ class HeartbeatNotifier:
         notification: str | None = None
         detail = ""
         if previous and previous.stale_notified:
-            notification = "RECOVERY"
-            detail = "중단되었던 heartbeat 수신이 재개되었습니다."
+            if heartbeat.status_level == "UP":
+                notification = "RECOVERY"
+                detail = "중단되었던 heartbeat 수신이 재개되었습니다."
+            else:
+                notification = "ALERT"
+                detail = (
+                    "heartbeat 수신은 재개되었지만 장비가 비정상 상태를 "
+                    "보고했습니다."
+                )
         elif heartbeat.status_level != "UP" and (
             previous is None
             or previous.status_signature != heartbeat.status_signature()
@@ -114,11 +145,18 @@ class HeartbeatNotifier:
         ):
             return
 
-        self._devices[heartbeat.device_id] = DeviceState(
+        last_seen_at = time.time()
+        state = DeviceState(
             heartbeat=heartbeat,
-            last_seen_at=time.monotonic(),
+            last_seen_at=last_seen_at,
             status_signature=heartbeat.status_signature(),
         )
+        self._state_repository.save(
+            heartbeat=heartbeat,
+            last_seen_at=last_seen_at,
+            stale_notified=False,
+        )
+        self._devices[heartbeat.device_id] = state
         self._consumer.commit(message=record, asynchronous=False)
         logger.info(
             "heartbeat 처리 및 commit 완료: device=%s status=%s topic=%s "
@@ -131,7 +169,7 @@ class HeartbeatNotifier:
         )
 
     def _notify_stale_devices(self) -> None:
-        now = time.monotonic()
+        now = time.time()
         for state in self._devices.values():
             if state.stale_notified:
                 continue
@@ -144,6 +182,7 @@ class HeartbeatNotifier:
                 continue
             detail = f"마지막 heartbeat 수신 후 {int(elapsed)}초가 지났습니다."
             if self._send_with_retry(state.heartbeat, "MISSING", detail):
+                self._state_repository.mark_stale(state.heartbeat.device_id)
                 state.stale_notified = True
 
     def _send_with_retry(
