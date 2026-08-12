@@ -1,54 +1,54 @@
 {
-    "specversion": "1.0",
-    "type": "com.kafka.producer",
-    "source": "/device/program/image-kafka-producer",
-    "id": "7e8f9c3e-4b2a-4d1a-9f3b-2c3e4d5f6a7b",
-    "time": "2024-06-01T12:00:00Z+09:00",
-    "subject": "healthcheck",
-    "datacontenttype": "application/json",
-    "dataschema": "company:schema:healthcheck:1.0",
-    "data": {
-        "sourceInfo": {
-            "systemId": "EQUIPMENT-IMAGE-KAFKA-PRODUCER",
-            "systemName": "Image Kafka Producer",
-            "sourceType": "WINDOWS",
-            "hostname": "producer-host",
-            "ipAddress": "192.168.1.100",
-            "osName": "Windows 10",
-            "osVersion": "10.0.19044",
-            "javaVersion": "1.8.0_202",
-            "programName": "Image Kafka Producer",
-            "programVersion": "1.0.0",
-            "processId": "12345",
-            "instanceId": "instance-001"
-        },
-        "status": {
-            "level": "INFO",
-            "code": "NORMAL",
-            "message": "Kafka producer is running normally."
-        },
-        "heartbeat": {
-            "sequence": 1,
-            "interval": 60,
-            "startedAt": "2024-06-01T12:00:00Z+09:00",
-            "uptimeSec": 3600,
-            "generatedAt": "2024-06-02T12:00:00Z+09:00"
-        },
-        "kafkaInfo": {
-            "topicName": "my_topic",
-            "lastSendSuccessAt": "2024-06-02T11:59:00Z+09:00",
-            "lastSendFailAt": null,
-            "sendSuccessCount": 1000,
-            "sendFailCount": 0
-        },
-        "workInfo": {
-            "lastImageDetectedAt": "2024-06-02T11:58:30Z+09:00",
-            "lastImageSentAt": "2024-06-02T11:58:00Z+09:00"
-        },
-        "errorInfo": {
-            "lastErrorAt": null,
-            "code": null,
-            "lastErrorMessage": null
-        }
+  "specversion": "1.0",
+  "id": "aa280a84-7bb6-48fa-82de-169e01180e64",
+  "source": "/systems/EQUIPMENT_IMAGE_SENDER/devices/DEVICE-001/programs/IMAGE_PRODUCER",
+  "type": "com.company.health.status.v1",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:company:schema:health-status:1.0",
+  "subject": "healthcheck",
+  "time": "2026-08-12T02:14:37.1025419Z",
+  "data": {
+    "sourceInfo": {
+      "systemId": "EQUIPMENT_IMAGE_SENDER",
+      "systemName": "EQUIPMENT_IMAGE_SENDER",
+      "sourceType": "WINDOWS_PC",
+      "hostname": "임의_호스트네임",
+      "ipAddress": "임의.아이피.주소.예시",
+      "osName": "Windows 10",
+      "osVersion": "10.0",
+      "javaVersion": "21.0.7",
+      "programName": "IMAGE_PRODUCER",
+      "programVersion": "1.1-SNAPSHOT",
+      "processId": "33484",
+      "instanceId": "DEVICE-001"
+    },
+    "status": {
+      "level": "WARN",
+      "code": "IMAGE_KAFKA_SEND_FAILED",
+      "message": "Latest image delivery failed"
+    },
+    "hearbeat": {
+      "sequence": 1,
+      "interval": 60,
+      "startedAt": "2026-08-12T02:14:25.799129500Z",
+      "uptimeSec": 11,
+      "generatedAt": "2026-08-12T02:14:37.102541900Z"
+    },
+    "kafkaInfo": {
+      "topicName": "임의-토픽-명-예시",
+      "lastSendSuccessAt": null,
+      "lastSendFailAt": "2026-08-12T02:14:28.232148100Z",
+      "sendSuccessCount": 0,
+      "sendFailCount": 1
+    },
+    "workInfo": {
+      "lastImageDetectedAt": "2026-08-12T02:14:27.119960100Z",
+      "lastImageSentAt": null
+    },
+    "errorInfo": {
+      "lastErrorAt": "2026-08-12T02:14:28.232148100Z",
+      "code": "IMAGE_KAFKA_SEND_FAILED",
+      "lastErrorMessage": "Not authorized to access topics: [임의-토픽-명-예시]"
     }
+  }
 }
