@@ -18,14 +18,19 @@ logger = logging.getLogger(__name__)
 class HeartbeatNotifier:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._consumer = Consumer(
-            {
-                "bootstrap.servers": settings.kafka_bootstrap_servers,
-                "group.id": settings.kafka_group_id,
-                "auto.offset.reset": settings.kafka_auto_offset_reset,
-                "enable.auto.commit": False,
-            }
-        )
+        consumer_config = {
+            "bootstrap.servers": settings.kafka_bootstrap_servers,
+            "group.id": settings.kafka_group_id,
+            "auto.offset.reset": settings.kafka_auto_offset_reset,
+            "enable.auto.commit": False,
+            "security.protocol": settings.kafka_security_protocol,
+            "sasl.mechanism": settings.kafka_sasl_mechanism,
+            "sasl.username": settings.kafka_sasl_username,
+            "sasl.password": settings.kafka_sasl_password,
+        }
+        if settings.kafka_ssl_ca_location:
+            consumer_config["ssl.ca.location"] = settings.kafka_ssl_ca_location
+        self._consumer = Consumer(consumer_config)
         self._mailer = SmtpMailer(settings)
         self._running = True
         self._last_sent_at = 0.0

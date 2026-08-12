@@ -31,6 +31,11 @@ class Settings:
     kafka_topic: str
     kafka_group_id: str
     kafka_auto_offset_reset: str
+    kafka_security_protocol: str
+    kafka_sasl_mechanism: str
+    kafka_sasl_username: str
+    kafka_sasl_password: str
+    kafka_ssl_ca_location: str
     smtp_host: str
     smtp_port: int
     smtp_username: str
@@ -54,10 +59,21 @@ class Settings:
             kafka_bootstrap_servers=_required("KAFKA_BOOTSTRAP_SERVERS"),
             kafka_topic=_required("KAFKA_TOPIC"),
             kafka_group_id=os.getenv(
-                "KAFKA_GROUP_ID", "heartbeat-smtp-notifier"
+                "KAFKA_GROUP_ID", "healthcheck-monitor"
             ).strip(),
             kafka_auto_offset_reset=os.getenv(
                 "KAFKA_AUTO_OFFSET_RESET", "latest"
+            ).strip(),
+            kafka_security_protocol=os.getenv(
+                "KAFKA_SECURITY_PROTOCOL", "SASL_SSL"
+            ).strip(),
+            kafka_sasl_mechanism=os.getenv(
+                "KAFKA_SASL_MECHANISM", "SCRAM-SHA-512"
+            ).strip(),
+            kafka_sasl_username=_required("KAFKA_SASL_USERNAME"),
+            kafka_sasl_password=_required("KAFKA_SASL_PASSWORD"),
+            kafka_ssl_ca_location=os.getenv(
+                "KAFKA_SSL_CA_LOCATION", ""
             ).strip(),
             smtp_host=_required("SMTP_HOST"),
             smtp_port=int(os.getenv("SMTP_PORT", "587")),
@@ -76,9 +92,10 @@ class Settings:
         )
         if settings.smtp_use_starttls and settings.smtp_use_ssl:
             raise ValueError("SMTP_USE_STARTTLS and SMTP_USE_SSL cannot both be true")
+        if settings.kafka_security_protocol.upper() != "SASL_SSL":
+            raise ValueError("KAFKA_SECURITY_PROTOCOL must be SASL_SSL")
         if not settings.smtp_to:
             raise ValueError("SMTP_TO must contain at least one email address")
         if settings.mail_min_interval_seconds < 0:
             raise ValueError("MAIL_MIN_INTERVAL_SECONDS cannot be negative")
         return settings
-
