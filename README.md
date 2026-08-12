@@ -21,9 +21,15 @@ Copy-Item .env.example .env
 python main.py
 ```
 
-`SMTP_TO`는 쉼표로 여러 주소를 지정할 수 있습니다. heartbeat마다 메일을 보내지
-않으려면 `MAIL_MIN_INTERVAL_SECONDS=300`처럼 최소 간격을 설정하세요. 간격 안에
-들어온 메시지는 메일 없이 offset이 commit됩니다.
+테스트는 별도 테스트 패키지 없이 실행할 수 있습니다.
+
+```powershell
+python -m unittest discover -v
+```
+
+`SMTP_TO`는 쉼표로 여러 주소를 지정할 수 있습니다. 정상 heartbeat는 메일 없이
+상태만 갱신합니다. 장비가 `WARN`/`UNKNOWN` 상태로 전환될 때, `UP`으로 복구될 때,
+그리고 heartbeat가 일정 시간 들어오지 않을 때만 메일을 발송합니다.
 
 ## Kafka SASL_SSL
 
@@ -33,10 +39,15 @@ python main.py
 사용하는 환경이면 `KAFKA_SSL_CA_LOCATION`에 PEM 인증서 경로를 지정하세요.
 
 160대가 1분마다 heartbeat를 보내는 정도는 단일 consumer로 충분합니다. 다만 운영
-알림은 메시지별 발송보다 장비별 마지막 수신 시각을 저장하고, 일정 시간(예: 3분)이
-지나도록 heartbeat가 없는 장비만 장애로 묶어서 알리는 방식을 권장합니다. 현재의
-`MAIL_MIN_INTERVAL_SECONDS`는 메일 폭주를 막기 위한 임시 안전장치이며, 장비별 누락
-감지는 실제 heartbeat의 장비 ID 필드에 맞춰 추가해야 합니다.
+consumer는 Kafka record key와 CloudEvent의 `data.sourceInfo.instanceId`를 장비 ID로
+사용합니다. `HEARTBEAT_STALE_AFTER_SECONDS`와 메시지의 heartbeat interval 3배 중
+큰 값을 미수신 기준으로 사용합니다. 현재 프로세스가 실행된 뒤 한 번 이상 수신한
+장비를 감시하며, 재시작 후 상태 유지와 전체 장비 사전 등록은 이후 DB 편입 시
+추가하는 것이 좋습니다.
+
+프로듀서가 보내는 Kafka value는 CloudEvents Structured JSON입니다. 현재 프로듀서
+소스의 `data.heartbeat`와 실제 캡처 샘플의 레거시 오타 `data.hearbeat`를 모두
+호환합니다. 잘못된 JSON이나 필수 필드가 없는 메시지는 오류 로그를 남기고 건너뜁니다.
 
 ## SMTP 설정 예시
 

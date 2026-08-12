@@ -45,7 +45,7 @@ class Settings:
     smtp_use_starttls: bool
     smtp_use_ssl: bool
     mail_subject_prefix: str
-    mail_min_interval_seconds: float
+    heartbeat_stale_after_seconds: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -86,8 +86,8 @@ class Settings:
             mail_subject_prefix=os.getenv(
                 "MAIL_SUBJECT_PREFIX", "[Kafka Heartbeat]"
             ).strip(),
-            mail_min_interval_seconds=float(
-                os.getenv("MAIL_MIN_INTERVAL_SECONDS", "0")
+            heartbeat_stale_after_seconds=float(
+                os.getenv("HEARTBEAT_STALE_AFTER_SECONDS", "180")
             ),
         )
         if settings.smtp_use_starttls and settings.smtp_use_ssl:
@@ -96,6 +96,6 @@ class Settings:
             raise ValueError("KAFKA_SECURITY_PROTOCOL must be SASL_SSL")
         if not settings.smtp_to:
             raise ValueError("SMTP_TO must contain at least one email address")
-        if settings.mail_min_interval_seconds < 0:
-            raise ValueError("MAIL_MIN_INTERVAL_SECONDS cannot be negative")
+        if settings.heartbeat_stale_after_seconds <= 0:
+            raise ValueError("HEARTBEAT_STALE_AFTER_SECONDS must be positive")
         return settings
