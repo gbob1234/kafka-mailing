@@ -39,7 +39,9 @@ python -m unittest discover -v
 기본 설정은 9094 포트의 `SASL_SSL` 접속과 consumer group
 `healthcheck-monitor`입니다. 브로커 설정에 맞춰 `KAFKA_SASL_MECHANISM`을
 `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` 중 하나로 지정합니다. 사설 CA를
-사용하는 환경이면 `KAFKA_SSL_CA_LOCATION`에 PEM 인증서 경로를 지정하세요.
+사용하는 환경이면서 컨테이너 기본 신뢰 저장소가 해당 CA를 신뢰하지 않는 경우에만
+`KAFKA_SSL_CA_LOCATION`에 PEM CA bundle 경로를 지정하세요. 별도 경로 없이
+SASL_SSL 연결이 성공한다면 이 값은 비워둘 수 있습니다.
 
 160대가 1분마다 heartbeat를 보내는 정도는 단일 consumer로 충분합니다. 다만 운영
 consumer는 Kafka record key와 CloudEvent의 `data.sourceInfo.instanceId`를 장비 ID로
@@ -113,19 +115,22 @@ ConfigMap이나 Secret의 환경변수는 실행 중인 컨테이너에 자동 �
 시작해야 합니다. SQLite를 사용하므로 Deployment는 `replicas: 1`과 `Recreate`
 전략을 유지해야 합니다.
 
-Kafka가 사설 CA를 사용하면 CA PEM을 별도 ConfigMap/Secret volume으로 마운트하고
-`KAFKA_SSL_CA_LOCATION`을 해당 파일 경로로 지정해야 합니다. Java producer의 JKS
-truststore 파일을 그대로 지정할 수는 없습니다.
+Kafka 인증서가 컨테이너 기본 신뢰 저장소에서 검증되지 않을 때만 CA PEM을 별도
+ConfigMap/Secret volume으로 마운트하고 `KAFKA_SSL_CA_LOCATION`을 해당 파일 경로로
+지정합니다. Java producer의 JKS truststore 파일을 그대로 지정할 수는 없습니다.
+Nginx TLS Secret의 `tls.crt`를 재사용하려면 그 파일에 Kafka 인증서의 발급 CA chain이
+PEM 형식으로 포함되어 있어야 합니다. `tls.key`는 Kafka 서버 인증 검증에 사용하지
+않습니다.
 
 프로듀서가 보내는 Kafka value는 CloudEvents Structured JSON입니다. 현재 프로듀서
 소스의 `data.heartbeat`와 실제 캡처 샘플의 레거시 오타 `data.hearbeat`를 모두
 호환합니다. 잘못된 JSON이나 필수 필드가 없는 메시지는 오류 로그를 남기고 건너뜁니다.
 
-## SMTP 설정 예시
+## SMTP 연결
 
-- STARTTLS(일반적으로 port 587): `SMTP_USE_STARTTLS=true`, `SMTP_USE_SSL=false`
-- Implicit TLS(일반적으로 port 465): `SMTP_USE_STARTTLS=false`, `SMTP_USE_SSL=true`
-- 사내 SMTP가 인증을 요구하지 않으면 `SMTP_USERNAME`과 `SMTP_PASSWORD`를 비웁니다.
+메일 서버는 사내 IP 화이트리스트 기반의 plain SMTP relay를 전제로 합니다. 항상
+`smtplib.SMTP`로 연결하며 `SMTP_SSL`, STARTTLS, SMTP AUTH를 사용하지 않습니다.
+기본 포트는 25이고 `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_TO`만 설정합니다.
 
 `.env`는 Git에서 제외되어 있습니다. 운영 환경에서는 비밀번호를 secret manager나
 배포 환경변수로 주입하는 것이 좋습니다.

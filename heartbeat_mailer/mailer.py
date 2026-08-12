@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from email.message import EmailMessage
 import smtplib
-import ssl
 
 from .config import Settings
 from .message import HeartbeatMessage
@@ -15,7 +14,7 @@ class SmtpMailer:
         """SMTP 발송기를 초기화한다.
 
         입력:
-            settings: SMTP 주소, 인증정보, 발신자와 수신자를 포함한 설정.
+            settings: SMTP 주소, 포트, 발신자와 수신자를 포함한 설정.
         반환:
             없음.
         """
@@ -71,39 +70,7 @@ class SmtpMailer:
             f"{heartbeat.pretty_payload()}\n"
         )
 
-        context = ssl.create_default_context()
-        if self._settings.smtp_use_ssl:
-            with smtplib.SMTP_SSL(
-                self._settings.smtp_host,
-                self._settings.smtp_port,
-                timeout=30,
-                context=context,
-            ) as smtp:
-                self._authenticate_and_send(smtp, message)
-            return
-
         with smtplib.SMTP(
             self._settings.smtp_host, self._settings.smtp_port, timeout=30
         ) as smtp:
-            if self._settings.smtp_use_starttls:
-                smtp.starttls(context=context)
-            self._authenticate_and_send(smtp, message)
-
-    def _authenticate_and_send(
-        self, smtp: smtplib.SMTP, message: EmailMessage
-    ) -> None:
-        """필요한 경우 SMTP 인증 후 작성된 메시지를 전송한다.
-
-        입력:
-            smtp: 연결과 TLS 설정이 끝난 SMTP 클라이언트.
-            message: 발송할 MIME 이메일 메시지.
-        반환:
-            없음.
-        예외:
-            smtplib.SMTPException: 인증 또는 메시지 발송이 실패한 경우.
-        """
-        if self._settings.smtp_username:
-            smtp.login(
-                self._settings.smtp_username, self._settings.smtp_password
-            )
-        smtp.send_message(message)
+            smtp.send_message(message)
