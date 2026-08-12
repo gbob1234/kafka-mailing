@@ -25,3 +25,5 @@ data:
   MAIL_RETRY_INITIAL_SECONDS: "5"
   MAIL_RETRY_MAX_SECONDS: "300"
   SQLITE_PATH: "/data/heartbeat_state.db"
+  # PowerStore block CSI는 WAL, NFS 기반이면 DELETE 권장
+  SQLITE_JOURNAL_MODE: "WAL"

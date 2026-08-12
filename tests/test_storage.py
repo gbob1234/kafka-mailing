@@ -42,6 +42,14 @@ class SQLiteDeviceStateRepositoryTest(unittest.TestCase):
             self.assertTrue(reopened.load_all()[0].stale_notified)
             reopened.close()
 
+    def test_delete_journal_mode_initializes_for_network_volume(self) -> None:
+        """NFS용 DELETE journal mode로 DB 스키마가 생성되는지 확인한다."""
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "state.db")
+            repository = SQLiteDeviceStateRepository(database, "DELETE")
+            self.assertEqual([], repository.load_all())
+            repository.close()
+
 
 if __name__ == "__main__":
     unittest.main()

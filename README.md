@@ -90,6 +90,9 @@ docker run --rm --env-file .env -v heartbeat-state:/data kafka-mailing:latest
 컨테이너는 root가 아닌 UID/GID `10001`로 실행하며 SQLite 기본 경로는
 `/data/heartbeat_state.db`입니다.
 
+Dockerfile의 `VOLUME` 선언은 Kubernetes PVC 마운트와 관계가 없고 익명 volume 혼동을
+줄이기 위해 제거했습니다. `/data` 디렉터리와 UID 10001 권한은 이미지에 유지됩니다.
+
 ## Kubernetes
 
 `k8s/`에 ConfigMap, Secret 예제, PVC, Deployment가 있습니다. 일반 설정은
@@ -114,6 +117,16 @@ ConfigMap이나 Secret의 환경변수는 실행 중인 컨테이너에 자동 �
 변경 후에는 `kubectl rollout restart deployment/healthcheck-monitor`로 Pod를 다시
 시작해야 합니다. SQLite를 사용하므로 Deployment는 `replicas: 1`과 `Recreate`
 전략을 유지해야 합니다.
+
+Deployment의 init container는 PowerStore PVC 마운트 직후 `/data` 소유권을 UID/GID
+10001로 맞춘 다음, 실제 애플리케이션 사용자로 SQLite 파일과 테이블을 생성합니다.
+권한 또는 스토리지 문제가 있으면 본 컨테이너 대신 init container 단계에서 명확히
+실패합니다.
+
+PowerStore block CSI 볼륨이면 기본 `SQLITE_JOURNAL_MODE=WAL`을 사용합니다. NFS로
+제공되는 PowerStore 볼륨이면 파일 잠금 호환성을 위해 `DELETE`를 권장합니다. NFS
+root-squash 정책으로 `chown`이 거부된다면 export 또는 StorageClass에서 UID/GID
+10001 쓰기 권한을 제공해야 하며 Pod 내부 명령만으로 우회할 수 없습니다.
 
 Kafka 인증서가 컨테이너 기본 신뢰 저장소에서 검증되지 않을 때만 CA PEM을 별도
 ConfigMap/Secret volume으로 마운트하고 `KAFKA_SSL_CA_LOCATION`을 해당 파일 경로로

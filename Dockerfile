@@ -19,6 +19,4 @@ COPY --chown=app:app heartbeat_mailer/ ./heartbeat_mailer/
 
 USER 10001:10001
 
-VOLUME ["/data"]
-
 CMD ["python", "main.py"]

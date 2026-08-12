@@ -71,15 +71,22 @@ class HeartbeatNotifier:
             consumer_config["ssl.ca.location"] = settings.kafka_ssl_ca_location
         self._consumer = Consumer(consumer_config)
         self._state_repository = state_repository or SQLiteDeviceStateRepository(
-            settings.sqlite_path
+            settings.sqlite_path,
+            settings.sqlite_journal_mode,
         )
         self._notification_repository = (
             notification_repository
-            or SQLiteNotificationQueueRepository(settings.sqlite_path)
+            or SQLiteNotificationQueueRepository(
+                settings.sqlite_path,
+                settings.sqlite_journal_mode,
+            )
         )
         self._notification_worker = notification_worker or MailNotificationWorker(
             settings,
-            SQLiteNotificationQueueRepository(settings.sqlite_path),
+            SQLiteNotificationQueueRepository(
+                settings.sqlite_path,
+                settings.sqlite_journal_mode,
+            ),
         )
         self._running = True
         self._last_poll_completed_at = time.monotonic()

@@ -41,6 +41,7 @@ class Settings:
     mail_subject_prefix: str
     heartbeat_stale_after_seconds: float
     sqlite_path: str
+    sqlite_journal_mode: str
     mail_queue_poll_seconds: float
     mail_max_retry_attempts: int
     mail_retry_initial_seconds: float
@@ -100,6 +101,9 @@ class Settings:
             sqlite_path=os.getenv(
                 "SQLITE_PATH", "heartbeat_state.db"
             ).strip(),
+            sqlite_journal_mode=os.getenv(
+                "SQLITE_JOURNAL_MODE", "WAL"
+            ).strip().upper(),
             mail_queue_poll_seconds=float(
                 os.getenv("MAIL_QUEUE_POLL_SECONDS", "1")
             ),
@@ -130,6 +134,8 @@ class Settings:
             raise ValueError("HEARTBEAT_STALE_AFTER_SECONDS must be positive")
         if not settings.sqlite_path:
             raise ValueError("SQLITE_PATH cannot be empty")
+        if settings.sqlite_journal_mode not in {"WAL", "DELETE"}:
+            raise ValueError("SQLITE_JOURNAL_MODE must be WAL or DELETE")
         if settings.mail_queue_poll_seconds <= 0:
             raise ValueError("MAIL_QUEUE_POLL_SECONDS must be positive")
         if settings.mail_max_retry_attempts <= 0:

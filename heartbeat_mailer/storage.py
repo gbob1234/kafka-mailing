@@ -121,7 +121,7 @@ class DeviceStateRepository(Protocol):
 class SQLiteDeviceStateRepository:
     """장비별 최신 상태를 SQLite 한 행으로 관리하는 저장소 구현."""
 
-    def __init__(self, database_path: str) -> None:
+    def __init__(self, database_path: str, journal_mode: str = "WAL") -> None:
         """SQLite 연결을 열고 필요한 테이블과 인덱스를 준비한다.
 
         입력:
@@ -137,9 +137,7 @@ class SQLiteDeviceStateRepository:
         self.path = path
         self._connection = sqlite3.connect(path, timeout=30)
         self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA synchronous=NORMAL")
-        self._connection.execute("PRAGMA busy_timeout=30000")
+        _configure_connection(self._connection, journal_mode)
         self._migrate()
 
     def _migrate(self) -> None:
@@ -340,7 +338,7 @@ class SQLiteNotificationQueueRepository:
 
     _ACTIVE_STATUSES = ("PENDING", "RETRY", "SENDING")
 
-    def __init__(self, database_path: str) -> None:
+    def __init__(self, database_path: str, journal_mode: str = "WAL") -> None:
         """SQLite 알림 큐 연결을 열고 중단된 발송 작업을 복구한다.
 
         입력:
@@ -355,9 +353,7 @@ class SQLiteNotificationQueueRepository:
             path, timeout=30, check_same_thread=False
         )
         self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA synchronous=NORMAL")
-        self._connection.execute("PRAGMA busy_timeout=30000")
+        _configure_connection(self._connection, journal_mode)
         self._migrate()
         self._recover_interrupted_jobs()
 
@@ -688,3 +684,25 @@ class _QueuedKafkaRecord:
     def offset(self) -> int:
         """저장된 Kafka offset을 반환한다."""
         return self._row["kafka_offset"]
+
+
+def _configure_connection(
+    connection: sqlite3.Connection, journal_mode: str
+) -> None:
+    """SQLite 연결에 journal, 동기화, 잠금 대기 정책을 적용한다.
+
+    입력:
+        connection: 설정할 SQLite 연결.
+        journal_mode: 로컬/block PVC용 ``WAL`` 또는 NFS 호환용 ``DELETE``.
+    반환:
+        없음.
+    예외:
+        ValueError: 지원하지 않는 journal mode인 경우.
+        sqlite3.Error: PRAGMA 적용에 실패한 경우.
+    """
+    normalized = journal_mode.strip().upper()
+    if normalized not in {"WAL", "DELETE"}:
+        raise ValueError("journal_mode must be WAL or DELETE")
+    connection.execute(f"PRAGMA journal_mode={normalized}")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout=30000")

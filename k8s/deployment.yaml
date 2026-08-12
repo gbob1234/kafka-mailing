@@ -17,7 +17,68 @@ spec:
       terminationGracePeriodSeconds: 30
       securityContext:
         fsGroup: 10001
-        fsGroupChangePolicy: OnRootMismatch
+        fsGroupChangePolicy: Always
+        supplementalGroups:
+          - 10001
+      initContainers:
+        - name: prepare-sqlite-volume
+          image: REPLACE_WITH_IMAGE
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              echo "Before permission setup:"
+              ls -ldn /data
+              chown -R 10001:10001 /data
+              chmod 0770 /data
+              echo "After permission setup:"
+              ls -ldn /data
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: state
+              mountPath: /data
+        - name: initialize-sqlite
+          image: REPLACE_WITH_IMAGE
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -c
+            - |
+              import os
+              from heartbeat_mailer.storage import (
+                  SQLiteDeviceStateRepository,
+                  SQLiteNotificationQueueRepository,
+              )
+
+              path = os.environ["SQLITE_PATH"]
+              mode = os.environ.get("SQLITE_JOURNAL_MODE", "WAL")
+              print(f"Initializing SQLite: path={path}, mode={mode}")
+
+              state = SQLiteDeviceStateRepository(path, mode)
+              state.close()
+              queue = SQLiteNotificationQueueRepository(path, mode)
+              queue.close()
+              print("SQLite initialization completed")
+          envFrom:
+            - configMapRef:
+                name: healthcheck-monitor-config
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: state
+              mountPath: /data
       containers:
         - name: healthcheck-monitor
           image: REPLACE_WITH_IMAGE
