@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DeviceState:
+    """실행 중인 장비의 마지막 heartbeat와 알림 상태를 보관한다."""
+
     heartbeat: HeartbeatMessage
     last_seen_at: float
     status_signature: tuple[str, str]
@@ -29,11 +31,25 @@ class DeviceState:
 
 
 class HeartbeatNotifier:
+    """Kafka heartbeat 소비, 상태 저장, 장애·복구 알림을 조정한다."""
+
     def __init__(
         self,
         settings: Settings,
         state_repository: DeviceStateRepository | None = None,
     ) -> None:
+        """Kafka consumer와 상태 저장소를 초기화하고 기존 상태를 복원한다.
+
+        입력:
+            settings: Kafka, SMTP, SQLite 및 알림 기준 설정.
+            state_repository: 테스트나 PostgreSQL 전환 시 주입할 저장소.
+                지정하지 않으면 설정된 경로의 SQLite 저장소를 생성한다.
+        반환:
+            없음.
+        예외:
+            KafkaException: Kafka consumer 설정이 유효하지 않은 경우.
+            sqlite3.Error: SQLite 연결 또는 초기 스키마 생성에 실패한 경우.
+        """
         self._settings = settings
         consumer_config = {
             "bootstrap.servers": settings.kafka_bootstrap_servers,
@@ -68,10 +84,27 @@ class HeartbeatNotifier:
         )
 
     def stop(self, _signum: int, _frame: FrameType | None) -> None:
+        """운영체제 종료 신호를 받아 소비 루프의 정상 종료를 요청한다.
+
+        입력:
+            _signum: 수신한 signal 번호. 현재 로직에서는 사용하지 않는다.
+            _frame: signal 발생 시점의 stack frame. 사용하지 않는다.
+        반환:
+            없음. 실행 플래그를 ``False``로 변경한다.
+        """
         logger.info("종료 신호를 받았습니다.")
         self._running = False
 
     def run(self) -> None:
+        """Kafka topic을 구독하고 종료 신호까지 heartbeat를 처리한다.
+
+        입력:
+            없음.
+        반환:
+            없음. 루프가 끝나면 consumer와 상태 저장소를 닫는다.
+        예외:
+            KafkaException: 복구할 수 없는 Kafka 오류가 발생한 경우.
+        """
         signal.signal(signal.SIGINT, self.stop)
         signal.signal(signal.SIGTERM, self.stop)
         self._consumer.subscribe([self._settings.kafka_topic])
@@ -94,6 +127,16 @@ class HeartbeatNotifier:
             logger.info("Kafka consumer가 종료되었습니다.")
 
     def _process(self, record: Message) -> None:
+        """Kafka 메시지 한 건을 검증하고 알림·저장·commit 순서로 처리한다.
+
+        입력:
+            record: 처리할 confluent-kafka ``Message`` 객체.
+        반환:
+            없음. 성공하면 SQLite 저장 후 해당 offset을 동기 commit한다.
+        처리 규칙:
+            잘못된 CloudEvent는 로그 후 건너뛰며, 메일 발송이나 상태 저장이
+            실패하면 정상 처리된 것으로 commit하지 않는다.
+        """
         try:
             heartbeat = HeartbeatMessage.from_kafka_record(record)
         except InvalidHeartbeat:
@@ -169,6 +212,13 @@ class HeartbeatNotifier:
         )
 
     def _notify_stale_devices(self) -> None:
+        """마지막 수신 시각이 기준을 넘긴 장비에 미수신 알림을 보낸다.
+
+        입력:
+            없음. 메모리에 복원된 모든 장비 상태와 현재 시각을 사용한다.
+        반환:
+            없음. 발송 성공 시 메모리와 SQLite의 미수신 알림 여부를 갱신한다.
+        """
         now = time.time()
         for state in self._devices.values():
             if state.stale_notified:
@@ -188,6 +238,15 @@ class HeartbeatNotifier:
     def _send_with_retry(
         self, heartbeat: HeartbeatMessage, notification: str, detail: str
     ) -> bool:
+        """종료 요청 전까지 SMTP 발송을 5초 간격으로 재시도한다.
+
+        입력:
+            heartbeat: 발송할 장비 상태 정보.
+            notification: 알림 유형 문자열.
+            detail: 메일에 표시할 상세 설명.
+        반환:
+            발송 성공 시 ``True``, 종료 요청으로 중단되면 ``False``.
+        """
         while self._running:
             try:
                 self._mailer.send_heartbeat(heartbeat, notification, detail)
@@ -203,6 +262,15 @@ class HeartbeatNotifier:
 
     @staticmethod
     def _handle_error(record: Message) -> None:
+        """Kafka poll 결과에 포함된 오류를 분류한다.
+
+        입력:
+            record: ``error()`` 정보를 가진 Kafka 메시지.
+        반환:
+            partition EOF는 디버그 로그만 남기고 반환한다.
+        예외:
+            KafkaException: partition EOF 이외의 Kafka 오류인 경우.
+        """
         error = record.error()
         if error.code() == KafkaError._PARTITION_EOF:
             logger.debug("Partition 끝에 도달했습니다: %s", error)

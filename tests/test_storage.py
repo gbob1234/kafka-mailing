@@ -10,7 +10,16 @@ from tests.test_message import FakeRecord, cloud_event
 
 
 class SQLiteDeviceStateRepositoryTest(unittest.TestCase):
+    """SQLite 장비 상태의 영속성과 갱신 동작을 확인한다."""
+
     def test_state_survives_reopen_and_stale_update(self) -> None:
+        """DB 재연결 후 상태와 미수신 표시가 유지되는지 확인한다.
+
+        입력:
+            없음. 테스트별 임시 디렉터리와 CloudEvent fixture를 사용한다.
+        반환:
+            없음. 검증 실패 시 unittest assertion 예외가 발생한다.
+        """
         with tempfile.TemporaryDirectory() as directory:
             database = str(Path(directory) / "state.db")
             heartbeat = HeartbeatMessage.from_kafka_record(

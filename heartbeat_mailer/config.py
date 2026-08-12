@@ -7,6 +7,15 @@ from dotenv import load_dotenv
 
 
 def _required(name: str) -> str:
+    """필수 환경변수를 읽고 앞뒤 공백을 제거한다.
+
+    입력:
+        name: 읽을 환경변수 이름.
+    반환:
+        비어 있지 않은 환경변수 문자열.
+    예외:
+        ValueError: 환경변수가 없거나 빈 문자열인 경우.
+    """
     value = os.getenv(name, "").strip()
     if not value:
         raise ValueError(f"Required environment variable is missing: {name}")
@@ -14,6 +23,16 @@ def _required(name: str) -> str:
 
 
 def _bool(name: str, default: bool) -> bool:
+    """환경변수 문자열을 불리언 값으로 변환한다.
+
+    입력:
+        name: 읽을 환경변수 이름.
+        default: 환경변수가 없을 때 사용할 기본값.
+    반환:
+        true/false 계열 문자열을 변환한 ``bool`` 값.
+    예외:
+        ValueError: 지원하지 않는 문자열이 설정된 경우.
+    """
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -27,6 +46,7 @@ def _bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
+    """Kafka, SMTP, 알림 및 SQLite 실행 설정을 보관하는 불변 객체."""
     kafka_bootstrap_servers: str
     kafka_topic: str
     kafka_group_id: str
@@ -50,6 +70,16 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        """환경변수와 ``.env`` 파일에서 전체 설정을 생성하고 검증한다.
+
+        입력:
+            없음. 프로세스 환경변수와 작업 경로의 ``.env``를 사용한다.
+        반환:
+            유효성 검사를 통과한 ``Settings`` 객체.
+        예외:
+            ValueError: 필수값 누락, 숫자 변환 실패 또는 서로 충돌하는
+                설정이 발견된 경우.
+        """
         load_dotenv()
         smtp_to = tuple(
             address.strip()
