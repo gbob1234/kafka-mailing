@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: healthcheck-monitor-config
+data:
+  KAFKA_BOOTSTRAP_SERVERS: "kafka.example.com:9094"
+  KAFKA_TOPIC: "healthcheck-heartbeat"
+  KAFKA_GROUP_ID: "healthcheck-monitor"
+  KAFKA_AUTO_OFFSET_RESET: "latest"
+  KAFKA_SECURITY_PROTOCOL: "SASL_SSL"
+  KAFKA_SASL_MECHANISM: "SCRAM-SHA-512"
+
+  SMTP_HOST: "smtp.example.com"
+  SMTP_PORT: "587"
+  SMTP_FROM: "sender@example.com"
+  SMTP_TO: "receiver@example.com"
+  SMTP_USE_STARTTLS: "true"
+  SMTP_USE_SSL: "false"
+
+  MAIL_SUBJECT_PREFIX: "[Kafka Heartbeat]"
+  HEARTBEAT_STALE_AFTER_SECONDS: "180"
+  SQLITE_PATH: "/data/heartbeat_state.db"

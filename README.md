@@ -51,6 +51,48 @@ consumer는 Kafka record key와 CloudEvent의 `data.sourceInfo.instanceId`를 �
 SQLite 접근은 `DeviceStateRepository` 경계 뒤에 분리되어 있습니다. 이후 PostgreSQL로
 전환할 때 동일 메서드를 구현하는 저장소를 추가하고 consumer에 주입하면 됩니다.
 
+## 컨테이너 이미지
+
+이미지에는 실행 명령 `python main.py`가 포함되어 있으므로 Kubernetes에서 별도의
+`command`나 `args`를 지정할 필요가 없습니다.
+
+```powershell
+docker build -t kafka-mailing:latest .
+docker run --rm --env-file .env -v heartbeat-state:/data kafka-mailing:latest
+```
+
+컨테이너는 root가 아닌 UID/GID `10001`로 실행하며 SQLite 기본 경로는
+`/data/heartbeat_state.db`입니다.
+
+## Kubernetes
+
+`k8s/`에 ConfigMap, Secret 예제, PVC, Deployment가 있습니다. 일반 설정은
+ConfigMap의 `envFrom`, 인증정보는 Secret의 `envFrom`을 통해 환경변수로 주입됩니다.
+애플리케이션은 환경변수를 직접 읽으므로 Pod 실행 명령으로 설정을 전달하거나 `.env`
+파일을 이미지에 포함할 필요가 없습니다.
+
+1. `k8s/configmap.yaml`의 Kafka/SMTP 주소와 수신자를 수정합니다.
+2. `k8s/secret.example.yaml`을 실제 Secret 관리 방식에 맞게 적용합니다. 실제 비밀번호가
+   들어간 Secret YAML은 Git에 커밋하지 마세요.
+3. `k8s/deployment.yaml`의 `REPLACE_WITH_IMAGE`를 빌드·배포한 이미지로 바꿉니다.
+4. 다음 순서로 적용합니다.
+
+```powershell
+kubectl apply -f k8s/configmap.yaml
+kubectl apply -f k8s/secret.example.yaml
+kubectl apply -f k8s/pvc.yaml
+kubectl apply -f k8s/deployment.yaml
+```
+
+ConfigMap이나 Secret의 환경변수는 실행 중인 컨테이너에 자동 갱신되지 않습니다.
+변경 후에는 `kubectl rollout restart deployment/healthcheck-monitor`로 Pod를 다시
+시작해야 합니다. SQLite를 사용하므로 Deployment는 `replicas: 1`과 `Recreate`
+전략을 유지해야 합니다.
+
+Kafka가 사설 CA를 사용하면 CA PEM을 별도 ConfigMap/Secret volume으로 마운트하고
+`KAFKA_SSL_CA_LOCATION`을 해당 파일 경로로 지정해야 합니다. Java producer의 JKS
+truststore 파일을 그대로 지정할 수는 없습니다.
+
 프로듀서가 보내는 Kafka value는 CloudEvents Structured JSON입니다. 현재 프로듀서
 소스의 `data.heartbeat`와 실제 캡처 샘플의 레거시 오타 `data.hearbeat`를 모두
 호환합니다. 잘못된 JSON이나 필수 필드가 없는 메시지는 오류 로그를 남기고 건너뜁니다.
