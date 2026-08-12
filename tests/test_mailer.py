@@ -51,6 +51,9 @@ class SmtpMailerTest(unittest.TestCase):
         heartbeat = HeartbeatMessage.from_kafka_record(
             FakeRecord(cloud_event())
         )
+        original_generated_at = heartbeat.payload["data"]["heartbeat"][
+            "generatedAt"
+        ]
 
         with patch("heartbeat_mailer.mailer.smtplib.SMTP", FakePlainSmtp):
             SmtpMailer(settings).send_heartbeat(
@@ -63,6 +66,20 @@ class SmtpMailerTest(unittest.TestCase):
             (smtp.host, smtp.port, smtp.timeout),
         )
         self.assertEqual(1, len(smtp.messages))
+        body = smtp.messages[0].get_content()
+        self.assertIn(
+            "CloudEvent 시각(KST): 2026-08-12 11:14:37.000 KST (UTC+09:00)",
+            body,
+        )
+        self.assertIn(
+            '"generatedAt": "2026-08-12T11:14:37+09:00"',
+            body,
+        )
+        self.assertNotIn("메일러 수신 시각(UTC)", body)
+        self.assertEqual(
+            original_generated_at,
+            heartbeat.payload["data"]["heartbeat"]["generatedAt"],
+        )
 
 
 if __name__ == "__main__":

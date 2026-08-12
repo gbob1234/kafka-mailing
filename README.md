@@ -145,6 +145,11 @@ PEM 형식으로 포함되어 있어야 합니다. `tls.key`는 Kafka 서버 인
 `smtplib.SMTP`로 연결하며 `SMTP_SSL`, STARTTLS, SMTP AUTH를 사용하지 않습니다.
 기본 포트는 25이고 `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_TO`만 설정합니다.
 
+Kafka와 SQLite에는 CloudEvent의 UTC 원문을 그대로 유지합니다. 이메일에서는
+CloudEvent 시각, heartbeat 생성 시각, 메일러 수신 시각을 KST(UTC+09:00)로 표시하고,
+Payload 영역의 `time` 및 `*At` 필드도 이메일 표시용 복사본에서만 `+09:00`으로
+변환합니다.
+
 `.env`는 Git에서 제외되어 있습니다. 운영 환경에서는 비밀번호를 secret manager나
 배포 환경변수로 주입하는 것이 좋습니다.
 
