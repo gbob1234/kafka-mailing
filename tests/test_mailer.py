@@ -76,6 +76,10 @@ class SmtpMailerTest(unittest.TestCase):
             body,
         )
         self.assertNotIn("메일러 수신 시각(UTC)", body)
+        self.assertIn("알림 유형: 경고", body)
+        self.assertIn("[경고]", str(smtp.messages[0]["Subject"]))
+        self.assertNotIn("장애", body)
+        self.assertNotIn("장애", str(smtp.messages[0]["Subject"]))
         self.assertEqual(
             original_generated_at,
             heartbeat.payload["data"]["heartbeat"]["generatedAt"],

@@ -43,7 +43,7 @@ class SmtpMailer:
             OSError: SMTP 서버와 네트워크 연결을 만들 수 없는 경우.
         """
         labels = {
-            "ALERT": "장애",
+            "ALERT": "경고",
             "RECOVERY": "복구",
             "MISSING": "Heartbeat 미수신",
         }
