@@ -49,6 +49,10 @@ class Settings:
     kafka_lag_log_interval_seconds: float
     kafka_poll_delay_guard_seconds: float
     stale_guard_recovery_seconds: float
+    kafka_health_check_interval_seconds: float
+    kafka_health_check_timeout_seconds: float
+    kafka_health_max_age_seconds: float
+    kafka_recovery_stabilization_seconds: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -125,6 +129,18 @@ class Settings:
             stale_guard_recovery_seconds=float(
                 os.getenv("STALE_GUARD_RECOVERY_SECONDS", "30")
             ),
+            kafka_health_check_interval_seconds=float(
+                os.getenv("KAFKA_HEALTH_CHECK_INTERVAL_SECONDS", "10")
+            ),
+            kafka_health_check_timeout_seconds=float(
+                os.getenv("KAFKA_HEALTH_CHECK_TIMEOUT_SECONDS", "3")
+            ),
+            kafka_health_max_age_seconds=float(
+                os.getenv("KAFKA_HEALTH_MAX_AGE_SECONDS", "30")
+            ),
+            kafka_recovery_stabilization_seconds=float(
+                os.getenv("KAFKA_RECOVERY_STABILIZATION_SECONDS", "30")
+            ),
         )
         if settings.kafka_security_protocol.upper() != "SASL_SSL":
             raise ValueError("KAFKA_SECURITY_PROTOCOL must be SASL_SSL")
@@ -153,4 +169,20 @@ class Settings:
             raise ValueError("KAFKA_POLL_DELAY_GUARD_SECONDS must be positive")
         if settings.stale_guard_recovery_seconds <= 0:
             raise ValueError("STALE_GUARD_RECOVERY_SECONDS must be positive")
+        if settings.kafka_health_check_interval_seconds <= 0:
+            raise ValueError("KAFKA_HEALTH_CHECK_INTERVAL_SECONDS must be positive")
+        if settings.kafka_health_check_timeout_seconds <= 0:
+            raise ValueError("KAFKA_HEALTH_CHECK_TIMEOUT_SECONDS must be positive")
+        if (
+            settings.kafka_health_max_age_seconds
+            < settings.kafka_health_check_interval_seconds
+        ):
+            raise ValueError(
+                "KAFKA_HEALTH_MAX_AGE_SECONDS must be greater than or equal "
+                "to KAFKA_HEALTH_CHECK_INTERVAL_SECONDS"
+            )
+        if settings.kafka_recovery_stabilization_seconds <= 0:
+            raise ValueError(
+                "KAFKA_RECOVERY_STABILIZATION_SECONDS must be positive"
+            )
         return settings

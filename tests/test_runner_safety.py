@@ -46,6 +46,63 @@ class RecordingStateRepository:
         self.marked.append(device_id)
 
 
+class FakeTopicMetadata:
+    """오류가 없는 Kafka topic metadata 대역."""
+
+    error = None
+
+
+class FakeMetadata:
+    """healthcheck topic을 포함하는 Kafka metadata 대역."""
+
+    def __init__(self) -> None:
+        """테스트 topic metadata 사전을 생성한다."""
+        self.topics = {"healthcheck": FakeTopicMetadata()}
+
+
+class FakePosition:
+    """consumer position과 partition 정보를 제공하는 대역."""
+
+    def __init__(self, offset: int = 100) -> None:
+        """고정 topic, partition과 주어진 offset을 저장한다."""
+        self.topic = "healthcheck"
+        self.partition = 0
+        self.offset = offset
+
+
+class FakeHealthyConsumer:
+    """broker 왕복 확인과 watermark 조회가 성공하는 consumer 대역."""
+
+    def __init__(self, high: int = 100) -> None:
+        """테스트에서 반환할 high watermark를 저장한다."""
+        self.high = high
+        self.position_value = FakePosition()
+
+    def list_topics(self, topic, timeout):
+        """정상 topic metadata를 반환한다."""
+        return FakeMetadata()
+
+    def assignment(self):
+        """할당된 partition 한 개를 반환한다."""
+        return [self.position_value]
+
+    def position(self, assignment):
+        """할당 partition의 현재 consumer position을 반환한다."""
+        return [self.position_value]
+
+    def get_watermark_offsets(self, position, timeout, cached):
+        """low=0과 설정된 high watermark를 반환한다."""
+        return 0, self.high
+
+
+class FakeBrokenConsumer(FakeHealthyConsumer):
+    """broker metadata 요청이 실패하는 consumer 대역."""
+
+    def list_topics(self, topic, timeout):
+        """Kafka broker 연결 실패를 흉내 낸다."""
+        raise RuntimeError("broker unavailable")
+
+
 class RunnerSafetyTest(unittest.TestCase):
     """poll 지연 및 backlog 상황의 미수신 오판 방지 동작을 검증한다."""
 
@@ -56,10 +113,21 @@ class RunnerSafetyTest(unittest.TestCase):
             kafka_poll_delay_guard_seconds=10.0,
             stale_guard_recovery_seconds=30.0,
             heartbeat_stale_after_seconds=180.0,
+            kafka_health_check_interval_seconds=10.0,
+            kafka_health_check_timeout_seconds=3.0,
+            kafka_health_max_age_seconds=30.0,
+            kafka_recovery_stabilization_seconds=30.0,
+            kafka_topic="healthcheck",
         )
         notifier._last_poll_completed_at = time.monotonic()
         notifier._stale_suppressed_until = 0.0
         notifier._last_stale_guard_log_at = 0.0
+        notifier._last_kafka_health_check_at = 0.0
+        notifier._last_kafka_health_success_at = time.monotonic()
+        notifier._kafka_healthy = True
+        notifier._kafka_ready_at = 0.0
+        notifier._last_known_lag = 0
+        notifier._kafka_health_reason = "정상"
         notifier._notification_repository = RecordingNotificationRepository()
         notifier._state_repository = RecordingStateRepository()
         heartbeat = HeartbeatMessage.from_kafka_record(
@@ -95,6 +163,33 @@ class RunnerSafetyTest(unittest.TestCase):
             notifier._notification_repository.calls,
         )
         self.assertEqual(["DEVICE-001"], notifier._state_repository.marked)
+
+    def test_broker_failure_suppresses_all_device_stale_notifications(self) -> None:
+        """Kafka broker 장애 시 장비별 미수신 알림을 만들지 않는지 확인한다."""
+        notifier = self._notifier()
+        notifier._consumer = FakeBrokenConsumer()
+        notifier._refresh_kafka_health(force=True)
+        notifier._notify_stale_devices()
+
+        self.assertFalse(notifier._kafka_healthy)
+        self.assertEqual([], notifier._notification_repository.calls)
+        self.assertEqual([], notifier._state_repository.marked)
+
+    def test_backlog_and_recovery_stabilization_block_stale_checks(self) -> None:
+        """lag 해소와 안정화가 끝날 때까지 미수신 판정을 막는지 확인한다."""
+        notifier = self._notifier()
+        notifier._consumer = FakeHealthyConsumer(high=120)
+        notifier._refresh_kafka_health(force=True)
+        self.assertEqual(20, notifier._last_known_lag)
+        self.assertIn("backlog", notifier._stale_block_reason(time.monotonic()))
+
+        notifier._consumer.high = 100
+        notifier._refresh_kafka_health(force=True)
+        self.assertEqual(0, notifier._last_known_lag)
+        self.assertIn("안정화", notifier._stale_block_reason(time.monotonic()))
+
+        notifier._kafka_ready_at = 0.0
+        self.assertIsNone(notifier._stale_block_reason(time.monotonic()))
 
 
 if __name__ == "__main__":

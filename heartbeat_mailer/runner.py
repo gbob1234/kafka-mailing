@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from types import FrameType
 
-from confluent_kafka import Consumer, KafkaError, KafkaException, Message
+from confluent_kafka import Consumer, KafkaError, Message
 
 from .config import Settings
 from .message import HeartbeatMessage, InvalidHeartbeat
@@ -96,6 +96,12 @@ class HeartbeatNotifier:
         )
         self._last_stale_guard_log_at = 0.0
         self._last_lag_log_at = 0.0
+        self._last_kafka_health_check_at = 0.0
+        self._last_kafka_health_success_at = 0.0
+        self._kafka_healthy = False
+        self._kafka_ready_at = float("inf")
+        self._last_known_lag: int | None = None
+        self._kafka_health_reason = "Kafka 상태 확인 전"
         self._devices: dict[str, DeviceState] = {
             state.heartbeat.device_id: DeviceState(
                 heartbeat=state.heartbeat,
@@ -142,16 +148,16 @@ class HeartbeatNotifier:
             while self._running:
                 record = self._consumer.poll(timeout=1.0)
                 self._observe_poll_delay()
+                self._refresh_kafka_health()
+                self._maybe_log_consumer_lag()
                 if record is None:
                     self._notify_stale_devices()
-                    self._maybe_log_consumer_lag()
                     continue
                 if record.error():
                     self._handle_error(record)
                     continue
                 self._process(record)
                 self._notify_stale_devices()
-                self._maybe_log_consumer_lag()
         finally:
             self._notification_worker.stop()
             self._consumer.close()
@@ -259,6 +265,16 @@ class HeartbeatNotifier:
             없음. 큐 등록 성공 후 메모리와 SQLite의 미수신 표시를 갱신한다.
         """
         monotonic_now = time.monotonic()
+        blocked_reason = self._stale_block_reason(monotonic_now)
+        if blocked_reason is not None:
+            if monotonic_now - self._last_stale_guard_log_at >= 10:
+                logger.warning(
+                    "장비 미수신 판정을 보류합니다: reason=%s",
+                    blocked_reason,
+                )
+                self._last_stale_guard_log_at = monotonic_now
+            return
+
         if monotonic_now < self._stale_suppressed_until:
             if monotonic_now - self._last_stale_guard_log_at >= 10:
                 logger.warning(
@@ -293,6 +309,122 @@ class HeartbeatNotifier:
                 int(elapsed),
             )
 
+    def _stale_block_reason(self, now: float) -> str | None:
+        """현재 장비 미수신 판정을 수행해도 안전한지 판단한다.
+
+        입력:
+            now: monotonic clock 기준 현재 시각.
+        반환:
+            판정을 보류해야 하면 사유 문자열, 안전하면 ``None``.
+        """
+        if not self._kafka_healthy:
+            return f"Kafka 비정상 ({self._kafka_health_reason})"
+        health_age = now - self._last_kafka_health_success_at
+        if health_age > self._settings.kafka_health_max_age_seconds:
+            return f"Kafka 상태 확인 만료 ({health_age:.1f}초 전)"
+        if self._last_known_lag is None:
+            return "Kafka consumer lag 미확인"
+        if self._last_known_lag > 0:
+            return f"Kafka backlog 처리 중 (lag={self._last_known_lag})"
+        if now < self._kafka_ready_at:
+            return (
+                "Kafka 복구 안정화 중 "
+                f"({self._kafka_ready_at - now:.1f}초 남음)"
+            )
+        return None
+
+    def _refresh_kafka_health(self, force: bool = False) -> None:
+        """실제 broker 왕복 통신과 fresh watermark로 Kafka 상태를 갱신한다.
+
+        입력:
+            force: 설정된 점검 주기를 무시하고 즉시 실행할지 여부.
+        반환:
+            없음. 건강 상태, lag, 안정화 시각을 내부 필드에 기록한다.
+        """
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_kafka_health_check_at
+            < self._settings.kafka_health_check_interval_seconds
+        ):
+            return
+        self._last_kafka_health_check_at = now
+
+        try:
+            metadata = self._consumer.list_topics(
+                topic=self._settings.kafka_topic,
+                timeout=self._settings.kafka_health_check_timeout_seconds,
+            )
+            topic_metadata = metadata.topics.get(self._settings.kafka_topic)
+            if topic_metadata is None:
+                raise RuntimeError("구독 topic metadata 없음")
+            topic_error = getattr(topic_metadata, "error", None)
+            if topic_error is not None:
+                code = topic_error.code() if hasattr(topic_error, "code") else 1
+                if code:
+                    raise RuntimeError(f"topic metadata 오류: {topic_error}")
+
+            assignment = self._consumer.assignment()
+            if not assignment:
+                raise RuntimeError("consumer partition 미할당")
+            positions = self._consumer.position(assignment)
+            total_lag = 0
+            for position in positions:
+                if position.offset is None or position.offset < 0:
+                    raise RuntimeError(
+                        f"consumer position 미확인: "
+                        f"{position.topic}[{position.partition}]"
+                    )
+                _, high = self._consumer.get_watermark_offsets(
+                    position,
+                    timeout=self._settings.kafka_health_check_timeout_seconds,
+                    cached=False,
+                )
+                total_lag += max(0, high - position.offset)
+        except Exception as exc:
+            self._mark_kafka_unhealthy(str(exc))
+            return
+
+        was_healthy = self._kafka_healthy
+        previous_lag = self._last_known_lag
+        self._kafka_healthy = True
+        self._last_kafka_health_success_at = now
+        self._last_known_lag = total_lag
+        self._kafka_health_reason = "정상"
+
+        if total_lag > 0:
+            self._kafka_ready_at = float("inf")
+            return
+        if not was_healthy or previous_lag is None or previous_lag > 0:
+            self._kafka_ready_at = (
+                now + self._settings.kafka_recovery_stabilization_seconds
+            )
+            logger.info(
+                "Kafka 연결 및 backlog 해소를 확인했습니다. 안정화 후 장비 "
+                "미수신 판정을 재개합니다: stabilization=%.1fs",
+                self._settings.kafka_recovery_stabilization_seconds,
+            )
+
+    def _mark_kafka_unhealthy(self, reason: str) -> None:
+        """Kafka를 비정상 상태로 표시하여 장비별 미수신 판정을 차단한다.
+
+        입력:
+            reason: 로그와 보류 사유에 사용할 오류 설명.
+        반환:
+            없음.
+        """
+        changed = self._kafka_healthy or self._kafka_health_reason != reason
+        self._kafka_healthy = False
+        self._kafka_ready_at = float("inf")
+        self._last_known_lag = None
+        self._kafka_health_reason = reason
+        if changed:
+            logger.error(
+                "Kafka broker 상태가 비정상입니다. 장비별 미수신 알림을 "
+                "중지합니다: reason=%s",
+                reason,
+            )
+
     def _observe_poll_delay(self) -> None:
         """연속 poll 완료 간격을 측정하고 지연 시 미수신 판정을 보류한다.
 
@@ -318,10 +450,10 @@ class HeartbeatNotifier:
         )
 
     def _maybe_log_consumer_lag(self) -> None:
-        """설정된 주기마다 현재 할당 partition의 consumer lag를 기록한다.
+        """설정된 주기마다 Kafka 건강 상태와 최근 consumer lag를 기록한다.
 
         입력:
-            없음. consumer assignment, position과 cached watermark를 사용한다.
+            없음. 최근 broker health check 결과를 사용한다.
         반환:
             없음. 조회 오류는 warning 로그만 남긴다.
         """
@@ -332,53 +464,26 @@ class HeartbeatNotifier:
         ):
             return
         self._last_lag_log_at = now
-        try:
-            assignment = self._consumer.assignment()
-            if not assignment:
-                logger.info("Kafka consumer lag: partition이 아직 할당되지 않았습니다.")
-                return
-            positions = self._consumer.position(assignment)
-            lags: list[str] = []
-            total_lag = 0
-            for position in positions:
-                _, high = self._consumer.get_watermark_offsets(
-                    position, cached=True
-                )
-                lag = max(0, high - max(0, position.offset))
-                total_lag += lag
-                lags.append(f"{position.topic}[{position.partition}]={lag}")
-            logger.info(
-                "Kafka consumer lag: total=%s partitions=%s",
-                total_lag,
-                ", ".join(lags),
-            )
-            if total_lag > 0:
-                self._stale_suppressed_until = max(
-                    self._stale_suppressed_until,
-                    now + self._settings.stale_guard_recovery_seconds,
-                )
-                logger.warning(
-                    "Kafka backlog이 남아 있어 미수신 판정을 보류합니다: "
-                    "lag=%s guard=%.1fs",
-                    total_lag,
-                    self._settings.stale_guard_recovery_seconds,
-                )
-        except Exception:
-            logger.warning("Kafka consumer lag 조회에 실패했습니다.", exc_info=True)
+        logger.info(
+            "Kafka 상태: healthy=%s lag=%s reason=%s",
+            self._kafka_healthy,
+            self._last_known_lag,
+            self._kafka_health_reason,
+        )
 
-    @staticmethod
-    def _handle_error(record: Message) -> None:
+    def _handle_error(self, record: Message) -> None:
         """Kafka poll 결과에 포함된 오류를 분류한다.
 
         입력:
             record: ``error()`` 정보를 가진 Kafka 메시지.
         반환:
             partition EOF는 디버그 로그만 남기고 반환한다.
-        예외:
-            KafkaException: partition EOF 이외의 Kafka 오류인 경우.
+        처리:
+            partition EOF는 무시하고, 그 외 오류는 Kafka 비정상 상태로 기록하여
+            장비별 미수신 알림을 보류한다.
         """
         error = record.error()
         if error.code() == KafkaError._PARTITION_EOF:
             logger.debug("Partition 끝에 도달했습니다: %s", error)
             return
-        raise KafkaException(error)
+        self._mark_kafka_unhealthy(str(error))

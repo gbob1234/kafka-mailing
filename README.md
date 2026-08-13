@@ -66,6 +66,10 @@ worker thread가 큐를 읽어 메일을 발송합니다.
 - consumer lag는 `KAFKA_LAG_LOG_INTERVAL_SECONDS` 주기로 로그에 출력합니다.
 - poll 간격이 비정상적으로 길면 `STALE_GUARD_RECOVERY_SECONDS` 동안 미수신
   판정을 보류하여 backlog에 있는 정상 heartbeat를 장애로 오판하지 않게 합니다.
+- broker metadata와 fresh watermark 조회가 실패하거나 partition이 할당되지 않으면
+  장비별 미수신 알림을 전부 보류합니다. 160대 장비 문제로 확대 해석하지 않습니다.
+- Kafka 복구 후 consumer lag가 0이 되고 안정화 시간이 지난 뒤에만 장비별 미수신
+  판정을 재개합니다.
 
 ```env
 MAIL_QUEUE_POLL_SECONDS=1
@@ -75,6 +79,10 @@ MAIL_RETRY_MAX_SECONDS=300
 KAFKA_LAG_LOG_INTERVAL_SECONDS=60
 KAFKA_POLL_DELAY_GUARD_SECONDS=10
 STALE_GUARD_RECOVERY_SECONDS=30
+KAFKA_HEALTH_CHECK_INTERVAL_SECONDS=10
+KAFKA_HEALTH_CHECK_TIMEOUT_SECONDS=3
+KAFKA_HEALTH_MAX_AGE_SECONDS=30
+KAFKA_RECOVERY_STABILIZATION_SECONDS=30
 ```
 
 ## 컨테이너 이미지
