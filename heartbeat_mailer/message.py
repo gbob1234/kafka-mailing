@@ -108,12 +108,12 @@ class HeartbeatMessage:
         return message
 
     def display_name(self) -> str:
-        """메일 제목에 사용할 사람이 읽기 쉬운 장비 표시명을 반환한다.
+        """메일 제목에 사용할 사람이 읽기 쉬운 수집기 표시명을 반환한다.
 
         입력:
-            없음. 객체의 프로그램명, 호스트명, 장비 ID를 사용한다.
+            없음. 객체의 프로그램명, 수집기 호스트명, 대상 장비 ID를 사용한다.
         반환:
-            ``프로그램 / 호스트 (장비 ID)`` 형식의 문자열.
+            ``프로그램 / 수집기 호스트 (대상 장비 ID)`` 형식의 문자열.
         """
         return f"{self.program_name} / {self.hostname} ({self.device_id})"
 

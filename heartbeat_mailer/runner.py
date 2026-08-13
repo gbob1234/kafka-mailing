@@ -221,7 +221,7 @@ class HeartbeatNotifier:
             else:
                 notification = "ALERT"
                 detail = (
-                    "heartbeat 수신은 재개되었지만 장비가 비정상 상태를 "
+                    "Heartbeat 수신은 재개되었지만 수집기가 비정상 상태를 "
                     "보고했습니다."
                 )
         elif heartbeat.status_level != "UP" and (
@@ -230,7 +230,7 @@ class HeartbeatNotifier:
             or not previous.status_alert_notified
         ):
             notification = "ALERT"
-            detail = "장비가 비정상 상태를 보고했습니다."
+            detail = "수집기가 비정상 상태를 보고했습니다."
         elif (
             previous is not None
             and previous.status_signature[0] != "UP"
@@ -238,7 +238,7 @@ class HeartbeatNotifier:
             and previous.status_alert_notified
         ):
             notification = "RECOVERY"
-            detail = "장비가 UP 상태로 복구되었습니다."
+            detail = "수집기가 UP 상태로 복구되었습니다."
 
         if notification:
             allowed = self._enqueue_if_equipment_active(

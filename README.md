@@ -184,9 +184,10 @@ PEM 형식으로 포함되어 있어야 합니다. `tls.key`는 Kafka 서버 인
 기본 포트는 25이고 `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_TO`만 설정합니다.
 
 Kafka와 SQLite에는 CloudEvent의 UTC 원문을 그대로 유지합니다. 이메일에서는
-CloudEvent 시각, heartbeat 생성 시각, 메일러 수신 시각을 KST(UTC+09:00)로 표시하고,
-Payload 영역의 `time` 및 `*At` 필드도 이메일 표시용 복사본에서만 `+09:00`으로
-변환합니다.
+수집기 보고 시각과 모니터링 수신 시각을 KST로 표시합니다. 현업용 HTML 메일은
+Outlook 호환성을 위해 테이블 레이아웃과 인라인 CSS를 사용하며 수집기 상태, 대상 장비
+식별정보와 판단 시각만 간결하게 제공합니다. 원본 Payload와 Kafka topic/partition/offset
+정보는 SQLite와 로그에는 유지하지만 메일 본문에는 포함하지 않습니다.
 
 `.env`는 Git에서 제외되어 있습니다. 운영 환경에서는 비밀번호를 secret manager나
 배포 환경변수로 주입하는 것이 좋습니다.

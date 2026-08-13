@@ -36,7 +36,7 @@ class FakePlainSmtp:
 
 
 class SmtpMailerTest(unittest.TestCase):
-    """메일 발송기가 암호화·인증 없이 plain SMTP만 사용하는지 검증한다."""
+    """plain SMTP와 Outlook 호환 수집기 알림 본문을 검증한다."""
 
     def test_uses_plain_smtp_without_tls_or_auth(self) -> None:
         """SMTP 생성과 send_message 외 메서드가 필요하지 않은지 확인한다."""
@@ -57,7 +57,7 @@ class SmtpMailerTest(unittest.TestCase):
 
         with patch("heartbeat_mailer.mailer.smtplib.SMTP", FakePlainSmtp):
             SmtpMailer(settings).send_heartbeat(
-                heartbeat, "ALERT", "test alert"
+                heartbeat, "ALERT", "장비가 비정상 상태를 보고했습니다."
             )
 
         smtp = FakePlainSmtp.instances[0]
@@ -66,24 +66,59 @@ class SmtpMailerTest(unittest.TestCase):
             (smtp.host, smtp.port, smtp.timeout),
         )
         self.assertEqual(1, len(smtp.messages))
-        body = smtp.messages[0].get_content()
+        sent = smtp.messages[0]
+        plain = sent.get_body(preferencelist=("plain",)).get_content()
+        html = sent.get_body(preferencelist=("html",)).get_content()
         self.assertIn(
-            "CloudEvent 시각(KST): 2026-08-12 11:14:37.000 KST (UTC+09:00)",
-            body,
+            "수집기 보고 시각: 2026-08-12 11:14:37 KST",
+            plain,
         )
-        self.assertIn(
-            '"generatedAt": "2026-08-12T11:14:37+09:00"',
-            body,
-        )
-        self.assertNotIn("메일러 수신 시각(UTC)", body)
-        self.assertIn("알림 유형: 경고", body)
-        self.assertIn("[경고]", str(smtp.messages[0]["Subject"]))
-        self.assertNotIn("장애", body)
-        self.assertNotIn("장애", str(smtp.messages[0]["Subject"]))
+        self.assertIn("수집기가 비정상 상태를 보고했습니다.", html)
+        self.assertIn("대상 장비 ID", html)
+        self.assertIn("수집기 호스트", html)
+        self.assertIn("IMAGE COLLECTOR MONITOR", html)
+        self.assertIn('role="presentation"', html)
+        self.assertIn("[수집기 경고]", str(sent["Subject"]))
+        self.assertNotIn("Payload", plain)
+        self.assertNotIn("Payload", html)
+        self.assertNotIn("Topic", html)
+        self.assertNotIn("Partition", html)
+        self.assertNotIn("장비가 비정상", plain)
+        self.assertNotIn("장비가 비정상", html)
+        self.assertIn("수집기가 비정상 상태를 보고했습니다.", plain)
         self.assertEqual(
             original_generated_at,
             heartbeat.payload["data"]["heartbeat"]["generatedAt"],
         )
+
+    def test_recovery_and_missing_use_collector_wording(self) -> None:
+        """복구와 미수신 본문도 장비가 아닌 수집기를 주체로 표시한다."""
+        FakePlainSmtp.instances.clear()
+        settings = SimpleNamespace(
+            smtp_host="mail.internal",
+            smtp_port=25,
+            smtp_from="sender@example.com",
+            smtp_to=("receiver@example.com",),
+            mail_subject_prefix="[Collector]",
+        )
+        heartbeat = HeartbeatMessage.from_kafka_record(
+            FakeRecord(cloud_event())
+        )
+
+        with patch("heartbeat_mailer.mailer.smtplib.SMTP", FakePlainSmtp):
+            mailer = SmtpMailer(settings)
+            mailer.send_heartbeat(heartbeat, "RECOVERY")
+            mailer.send_heartbeat(heartbeat, "MISSING")
+
+        recovery_html = FakePlainSmtp.instances[0].messages[0].get_body(
+            preferencelist=("html",)
+        ).get_content()
+        missing_html = FakePlainSmtp.instances[1].messages[0].get_body(
+            preferencelist=("html",)
+        ).get_content()
+        self.assertIn("수집기가 UP 상태로 복구되었습니다.", recovery_html)
+        self.assertIn("수집기의 Heartbeat가 일정 시간 수신되지 않았습니다.", missing_html)
+        self.assertNotIn("장비가 UP", recovery_html)
 
 
 if __name__ == "__main__":
