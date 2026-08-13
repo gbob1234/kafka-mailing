@@ -73,10 +73,16 @@ class FakePosition:
 class FakeHealthyConsumer:
     """broker 왕복 확인과 watermark 조회가 성공하는 consumer 대역."""
 
-    def __init__(self, high: int = 100) -> None:
-        """테스트에서 반환할 high watermark를 저장한다."""
+    def __init__(
+        self,
+        high: int = 100,
+        position: int = 100,
+        committed: int | None = None,
+    ) -> None:
+        """watermark, 현재 position과 저장된 group offset을 준비한다."""
         self.high = high
-        self.position_value = FakePosition()
+        self.position_value = FakePosition(position)
+        self.committed_offset = committed
 
     def list_topics(self, topic, timeout):
         """정상 topic metadata를 반환한다."""
@@ -89,6 +95,11 @@ class FakeHealthyConsumer:
     def position(self, assignment):
         """할당 partition의 현재 consumer position을 반환한다."""
         return [self.position_value]
+
+    def committed(self, partitions, timeout):
+        """consumer group에 저장된 offset 또는 미확인 값을 반환한다."""
+        offset = -1001 if self.committed_offset is None else self.committed_offset
+        return [FakePosition(offset)]
 
     def get_watermark_offsets(self, position, timeout, cached):
         """low=0과 설정된 high watermark를 반환한다."""
@@ -118,6 +129,7 @@ class RunnerSafetyTest(unittest.TestCase):
             kafka_health_max_age_seconds=30.0,
             kafka_recovery_stabilization_seconds=30.0,
             kafka_topic="healthcheck",
+            kafka_auto_offset_reset="latest",
         )
         notifier._last_poll_completed_at = time.monotonic()
         notifier._stale_suppressed_until = 0.0
@@ -190,6 +202,34 @@ class RunnerSafetyTest(unittest.TestCase):
 
         notifier._kafka_ready_at = 0.0
         self.assertIsNone(notifier._stale_block_reason(time.monotonic()))
+
+    def test_invalid_position_uses_committed_group_offset(self) -> None:
+        """현재 position 미확인 시 저장된 group offset으로 lag를 계산한다."""
+        notifier = self._notifier()
+        notifier._consumer = FakeHealthyConsumer(
+            high=120,
+            position=-1001,
+            committed=100,
+        )
+
+        notifier._refresh_kafka_health(force=True)
+
+        self.assertTrue(notifier._kafka_healthy)
+        self.assertEqual(20, notifier._last_known_lag)
+
+    def test_missing_position_and_commit_uses_latest_watermark(self) -> None:
+        """저장 offset도 없으면 latest 정책의 high watermark를 사용한다."""
+        notifier = self._notifier()
+        notifier._consumer = FakeHealthyConsumer(
+            high=120,
+            position=-1001,
+            committed=None,
+        )
+
+        notifier._refresh_kafka_health(force=True)
+
+        self.assertTrue(notifier._kafka_healthy)
+        self.assertEqual(0, notifier._last_known_lag)
 
 
 if __name__ == "__main__":

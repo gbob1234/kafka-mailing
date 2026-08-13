@@ -368,19 +368,59 @@ class HeartbeatNotifier:
             if not assignment:
                 raise RuntimeError("consumer partition 미할당")
             positions = self._consumer.position(assignment)
+            if len(positions) != len(assignment):
+                raise RuntimeError("consumer position 조회 결과 불일치")
+
+            unresolved = [
+                position
+                for position in positions
+                if position.offset is None or position.offset < 0
+            ]
+            committed_offsets: dict[tuple[str, int], int | None] = {}
+            if unresolved:
+                committed = self._consumer.committed(
+                    unresolved,
+                    timeout=self._settings.kafka_health_check_timeout_seconds,
+                )
+                committed_offsets = {
+                    (item.topic, item.partition): item.offset
+                    for item in committed
+                }
+
             total_lag = 0
             for position in positions:
-                if position.offset is None or position.offset < 0:
-                    raise RuntimeError(
-                        f"consumer position 미확인: "
-                        f"{position.topic}[{position.partition}]"
-                    )
-                _, high = self._consumer.get_watermark_offsets(
+                low, high = self._consumer.get_watermark_offsets(
                     position,
                     timeout=self._settings.kafka_health_check_timeout_seconds,
                     cached=False,
                 )
-                total_lag += max(0, high - position.offset)
+                effective_offset = position.offset
+                if effective_offset is None or effective_offset < 0:
+                    effective_offset = committed_offsets.get(
+                        (position.topic, position.partition)
+                    )
+                if effective_offset is None or effective_offset < 0:
+                    reset_policy = (
+                        self._settings.kafka_auto_offset_reset.lower()
+                    )
+                    if reset_policy in {"latest", "largest"}:
+                        effective_offset = high
+                    elif reset_policy in {"earliest", "smallest"}:
+                        effective_offset = low
+                    else:
+                        raise RuntimeError(
+                            "consumer position과 committed offset 미확인: "
+                            f"{position.topic}[{position.partition}]"
+                        )
+                    logger.debug(
+                        "저장된 consumer offset이 없어 reset 정책을 적용합니다: "
+                        "topic=%s partition=%s policy=%s offset=%s",
+                        position.topic,
+                        position.partition,
+                        reset_policy,
+                        effective_offset,
+                    )
+                total_lag += max(0, high - effective_offset)
         except Exception as exc:
             self._mark_kafka_unhealthy(str(exc))
             return
