@@ -27,7 +27,12 @@ class SQLiteDeviceStateRepositoryTest(unittest.TestCase):
             )
 
             repository = SQLiteDeviceStateRepository(database)
-            repository.save(heartbeat, last_seen_at=1_700_000_000.0, stale_notified=False)
+            repository.save(
+                heartbeat,
+                last_seen_at=1_700_000_000.0,
+                stale_notified=False,
+                status_alert_notified=True,
+            )
             repository.close()
 
             reopened = SQLiteDeviceStateRepository(database)
@@ -36,10 +41,13 @@ class SQLiteDeviceStateRepositoryTest(unittest.TestCase):
             self.assertEqual("DEVICE-001", states[0].heartbeat.device_id)
             self.assertEqual(("WARN", "IMAGE_KAFKA_SEND_FAILED"), states[0].status_signature)
             self.assertFalse(states[0].stale_notified)
+            self.assertTrue(states[0].status_alert_notified)
             self.assertEqual(1_700_000_000.0, states[0].last_seen_at)
 
             reopened.mark_stale("DEVICE-001")
             self.assertTrue(reopened.load_all()[0].stale_notified)
+            reopened.mark_status_alert("DEVICE-001", False)
+            self.assertFalse(reopened.load_all()[0].status_alert_notified)
             reopened.close()
 
     def test_delete_journal_mode_initializes_for_network_volume(self) -> None:

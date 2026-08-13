@@ -11,6 +11,10 @@ from confluent_kafka import Consumer, KafkaError, Message
 from .config import Settings
 from .message import HeartbeatMessage, InvalidHeartbeat
 from .notification_worker import MailNotificationWorker
+from .equipment_status import (
+    EquipmentStatusProvider,
+    OracleEquipmentStatusCache,
+)
 from .storage import (
     DeviceStateRepository,
     NotificationQueueRepository,
@@ -30,6 +34,7 @@ class DeviceState:
     last_seen_at: float
     status_signature: tuple[str, str]
     stale_notified: bool = False
+    status_alert_notified: bool = False
 
 
 class HeartbeatNotifier:
@@ -41,6 +46,7 @@ class HeartbeatNotifier:
         state_repository: DeviceStateRepository | None = None,
         notification_repository: NotificationQueueRepository | None = None,
         notification_worker: MailNotificationWorker | None = None,
+        equipment_status_provider: EquipmentStatusProvider | None = None,
     ) -> None:
         """Kafka consumer와 상태 저장소를 초기화하고 기존 상태를 복원한다.
 
@@ -50,6 +56,7 @@ class HeartbeatNotifier:
                 지정하지 않으면 설정된 경로의 SQLite 저장소를 생성한다.
             notification_repository: consumer가 알림을 등록할 영속 큐 저장소.
             notification_worker: 테스트에서 주입할 별도 SMTP worker.
+            equipment_status_provider: MES 상태 조회 구현. 없으면 Oracle 캐시를 생성한다.
         반환:
             없음.
         예외:
@@ -88,6 +95,9 @@ class HeartbeatNotifier:
                 settings.sqlite_journal_mode,
             ),
         )
+        self._equipment_status = (
+            equipment_status_provider or OracleEquipmentStatusCache(settings)
+        )
         self._running = True
         self._last_poll_completed_at = time.monotonic()
         self._stale_suppressed_until = (
@@ -108,6 +118,7 @@ class HeartbeatNotifier:
                 last_seen_at=state.last_seen_at,
                 status_signature=state.status_signature,
                 stale_notified=state.stale_notified,
+                status_alert_notified=state.status_alert_notified,
             )
             for state in self._state_repository.load_all()
         }
@@ -141,6 +152,7 @@ class HeartbeatNotifier:
         signal.signal(signal.SIGINT, self.stop)
         signal.signal(signal.SIGTERM, self.stop)
         self._consumer.subscribe([self._settings.kafka_topic])
+        self._equipment_status.start()
         self._notification_worker.start()
         logger.info("Kafka topic 구독 시작: %s", self._settings.kafka_topic)
 
@@ -160,6 +172,7 @@ class HeartbeatNotifier:
                 self._notify_stale_devices()
         finally:
             self._notification_worker.stop()
+            self._equipment_status.stop()
             self._consumer.close()
             self._notification_repository.close()
             self._state_repository.close()
@@ -198,6 +211,9 @@ class HeartbeatNotifier:
         previous = self._devices.get(heartbeat.device_id)
         notification: str | None = None
         detail = ""
+        status_alert_notified = (
+            previous.status_alert_notified if previous else False
+        )
         if previous and previous.stale_notified:
             if heartbeat.status_level == "UP":
                 notification = "RECOVERY"
@@ -211,6 +227,7 @@ class HeartbeatNotifier:
         elif heartbeat.status_level != "UP" and (
             previous is None
             or previous.status_signature != heartbeat.status_signature()
+            or not previous.status_alert_notified
         ):
             notification = "ALERT"
             detail = "장비가 비정상 상태를 보고했습니다."
@@ -218,31 +235,32 @@ class HeartbeatNotifier:
             previous is not None
             and previous.status_signature[0] != "UP"
             and heartbeat.status_level == "UP"
+            and previous.status_alert_notified
         ):
             notification = "RECOVERY"
             detail = "장비가 UP 상태로 복구되었습니다."
 
         if notification:
-            added = self._notification_repository.enqueue(
+            allowed = self._enqueue_if_equipment_active(
                 heartbeat, notification, detail
             )
-            logger.info(
-                "메일 알림 큐 등록: device=%s type=%s added=%s",
-                heartbeat.device_id,
-                notification,
-                added,
-            )
+            if notification == "ALERT":
+                status_alert_notified = allowed
+        if heartbeat.status_level == "UP":
+            status_alert_notified = False
 
         last_seen_at = time.time()
         state = DeviceState(
             heartbeat=heartbeat,
             last_seen_at=last_seen_at,
             status_signature=heartbeat.status_signature(),
+            status_alert_notified=status_alert_notified,
         )
         self._state_repository.save(
             heartbeat=heartbeat,
             last_seen_at=last_seen_at,
             stale_notified=False,
+            status_alert_notified=status_alert_notified,
         )
         self._devices[heartbeat.device_id] = state
         self._consumer.commit(message=record, asynchronous=False)
@@ -297,17 +315,55 @@ class HeartbeatNotifier:
             if elapsed < threshold:
                 continue
             detail = f"마지막 heartbeat 수신 후 {int(elapsed)}초가 지났습니다."
-            added = self._notification_repository.enqueue(
+            if not self._enqueue_if_equipment_active(
                 state.heartbeat, "MISSING", detail
-            )
+            ):
+                continue
             self._state_repository.mark_stale(state.heartbeat.device_id)
             state.stale_notified = True
             logger.warning(
-                "heartbeat 미수신 알림 큐 등록: device=%s added=%s elapsed=%ss",
+                "heartbeat 미수신 알림 상태 기록: device=%s elapsed=%ss",
                 state.heartbeat.device_id,
-                added,
                 int(elapsed),
             )
+
+    def _enqueue_if_equipment_active(
+        self,
+        heartbeat: HeartbeatMessage,
+        notification_type: str,
+        detail: str,
+    ) -> bool:
+        """MES 상태가 STAB 또는 NECK인 경우에만 메일 큐에 등록한다.
+
+        입력:
+            heartbeat: 알림 대상 장비의 최신 heartbeat.
+            notification_type: ALERT, RECOVERY 또는 MISSING.
+            detail: 메일 본문에 포함할 판정 설명.
+        반환:
+            MES 조건을 충족해 알림 대상으로 인정했으면 ``True``.
+        """
+        decision = self._equipment_status.alert_decision(heartbeat.device_id)
+        if not decision.allowed:
+            logger.debug(
+                "MES 상태 조건으로 메일 알림을 보류합니다: "
+                "device=%s type=%s status=%s reason=%s",
+                heartbeat.device_id,
+                notification_type,
+                decision.status_code,
+                decision.reason,
+            )
+            return False
+        added = self._notification_repository.enqueue(
+            heartbeat, notification_type, detail
+        )
+        logger.info(
+            "메일 알림 큐 등록: device=%s type=%s mesStatus=%s added=%s",
+            heartbeat.device_id,
+            notification_type,
+            decision.status_code,
+            added,
+        )
+        return True
 
     def _stale_block_reason(self, now: float) -> str | None:
         """현재 장비 미수신 판정을 수행해도 안전한지 판단한다.

@@ -53,6 +53,14 @@ class Settings:
     kafka_health_check_timeout_seconds: float
     kafka_health_max_age_seconds: float
     kafka_recovery_stabilization_seconds: float
+    oracle_dsn: str
+    oracle_user: str
+    oracle_password: str
+    oracle_status_query: str
+    oracle_refresh_seconds: float
+    oracle_cache_max_age_seconds: float
+    oracle_call_timeout_ms: int
+    oracle_alert_status_codes: frozenset[str]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -141,6 +149,26 @@ class Settings:
             kafka_recovery_stabilization_seconds=float(
                 os.getenv("KAFKA_RECOVERY_STABILIZATION_SECONDS", "30")
             ),
+            oracle_dsn=_required("ORACLE_DSN"),
+            oracle_user=_required("ORACLE_USER"),
+            oracle_password=_required("ORACLE_PASSWORD"),
+            oracle_status_query=_required("ORACLE_STATUS_QUERY"),
+            oracle_refresh_seconds=float(
+                os.getenv("ORACLE_REFRESH_SECONDS", "30")
+            ),
+            oracle_cache_max_age_seconds=float(
+                os.getenv("ORACLE_CACHE_MAX_AGE_SECONDS", "90")
+            ),
+            oracle_call_timeout_ms=int(
+                os.getenv("ORACLE_CALL_TIMEOUT_MS", "5000")
+            ),
+            oracle_alert_status_codes=frozenset(
+                code.strip().upper()
+                for code in os.getenv(
+                    "ORACLE_ALERT_STATUS_CODES", "STAB,NECK"
+                ).split(",")
+                if code.strip()
+            ),
         )
         if settings.kafka_security_protocol.upper() != "SASL_SSL":
             raise ValueError("KAFKA_SECURITY_PROTOCOL must be SASL_SSL")
@@ -185,4 +213,18 @@ class Settings:
             raise ValueError(
                 "KAFKA_RECOVERY_STABILIZATION_SECONDS must be positive"
             )
+        if settings.oracle_refresh_seconds <= 0:
+            raise ValueError("ORACLE_REFRESH_SECONDS must be positive")
+        if (
+            settings.oracle_cache_max_age_seconds
+            < settings.oracle_refresh_seconds
+        ):
+            raise ValueError(
+                "ORACLE_CACHE_MAX_AGE_SECONDS must be greater than or equal "
+                "to ORACLE_REFRESH_SECONDS"
+            )
+        if settings.oracle_call_timeout_ms <= 0:
+            raise ValueError("ORACLE_CALL_TIMEOUT_MS must be positive")
+        if not settings.oracle_alert_status_codes:
+            raise ValueError("ORACLE_ALERT_STATUS_CODES cannot be empty")
         return settings

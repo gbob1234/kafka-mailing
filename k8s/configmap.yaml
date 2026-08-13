@@ -10,6 +10,16 @@ data:
   KAFKA_SECURITY_PROTOCOL: "SASL_SSL"
   KAFKA_SASL_MECHANISM: "SCRAM-SHA-512"
 
+  ORACLE_DSN: "oracle.example.com:1521/service-name"
+  # 첫 컬럼 EQP_ID, 두 번째 컬럼 MAIN_STAT_CD를 반환하는 실제 SQL로 교체
+  ORACLE_STATUS_QUERY: >-
+    select eqp_id, main_stat_cd
+    from REPLACE_WITH_STATUS_TABLE
+  ORACLE_REFRESH_SECONDS: "30"
+  ORACLE_CACHE_MAX_AGE_SECONDS: "90"
+  ORACLE_CALL_TIMEOUT_MS: "5000"
+  ORACLE_ALERT_STATUS_CODES: "STAB,NECK"
+
   SMTP_HOST: "smtp.example.com"
   SMTP_PORT: "25"
   SMTP_FROM: "sender@example.com"

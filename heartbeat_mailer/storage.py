@@ -18,6 +18,7 @@ class StoredDeviceState:
     last_seen_at: float
     status_signature: tuple[str, str]
     stale_notified: bool
+    status_alert_notified: bool
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class DeviceStateRepository(Protocol):
         heartbeat: HeartbeatMessage,
         last_seen_at: float,
         stale_notified: bool,
+        status_alert_notified: bool,
     ) -> None:
         """장비의 최신 heartbeat 상태를 저장하거나 덮어쓴다.
 
@@ -92,6 +94,7 @@ class DeviceStateRepository(Protocol):
             heartbeat: 저장할 검증 완료 heartbeat.
             last_seen_at: Unix epoch 초 단위의 마지막 수신 시각.
             stale_notified: 미수신 알림 발송 여부.
+            status_alert_notified: 비정상 상태 경고 등록 여부.
         반환:
             없음.
         """
@@ -105,6 +108,10 @@ class DeviceStateRepository(Protocol):
         반환:
             없음.
         """
+        ...
+
+    def mark_status_alert(self, device_id: str, notified: bool) -> None:
+        """지정 장비의 비정상 상태 경고 등록 여부를 갱신한다."""
         ...
 
     def close(self) -> None:
@@ -167,6 +174,7 @@ class SQLiteDeviceStateRepository:
                 generated_at TEXT NOT NULL,
                 last_seen_at REAL NOT NULL,
                 stale_notified INTEGER NOT NULL DEFAULT 0,
+                status_alert_notified INTEGER NOT NULL DEFAULT 0,
                 event_id TEXT NOT NULL,
                 raw_payload TEXT NOT NULL,
                 kafka_key TEXT,
@@ -177,6 +185,17 @@ class SQLiteDeviceStateRepository:
             )
             """
         )
+        columns = {
+            row["name"]
+            for row in self._connection.execute(
+                "PRAGMA table_info(device_states)"
+            ).fetchall()
+        }
+        if "status_alert_notified" not in columns:
+            self._connection.execute(
+                "ALTER TABLE device_states ADD COLUMN "
+                "status_alert_notified INTEGER NOT NULL DEFAULT 0"
+            )
         self._connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_device_states_last_seen
@@ -221,6 +240,7 @@ class SQLiteDeviceStateRepository:
                     last_seen_at=row["last_seen_at"],
                     status_signature=(row["status_level"], row["status_code"]),
                     stale_notified=bool(row["stale_notified"]),
+                    status_alert_notified=bool(row["status_alert_notified"]),
                 )
             )
         return states
@@ -230,6 +250,7 @@ class SQLiteDeviceStateRepository:
         heartbeat: HeartbeatMessage,
         last_seen_at: float,
         stale_notified: bool,
+        status_alert_notified: bool,
     ) -> None:
         """장비 ID를 기준으로 최신 상태를 원자적으로 upsert한다.
 
@@ -237,6 +258,7 @@ class SQLiteDeviceStateRepository:
             heartbeat: 원본 CloudEvent와 Kafka 메타데이터를 포함한 상태.
             last_seen_at: Unix epoch 초 단위의 마지막 수신 시각.
             stale_notified: 미수신 알림을 이미 발송했는지 여부.
+            status_alert_notified: 비정상 상태 경고를 큐에 등록했는지 여부.
         반환:
             없음. SQL 실행 후 즉시 commit한다.
         예외:
@@ -248,9 +270,10 @@ class SQLiteDeviceStateRepository:
                 device_id, system_id, hostname, ip_address, program_name,
                 program_version, status_level, status_code, status_message,
                 heartbeat_interval_seconds, heartbeat_sequence, generated_at,
-                last_seen_at, stale_notified, event_id, raw_payload, kafka_key,
+                last_seen_at, stale_notified, status_alert_notified,
+                event_id, raw_payload, kafka_key,
                 kafka_topic, kafka_partition, kafka_offset, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(device_id) DO UPDATE SET
                 system_id=excluded.system_id,
                 hostname=excluded.hostname,
@@ -265,6 +288,7 @@ class SQLiteDeviceStateRepository:
                 generated_at=excluded.generated_at,
                 last_seen_at=excluded.last_seen_at,
                 stale_notified=excluded.stale_notified,
+                status_alert_notified=excluded.status_alert_notified,
                 event_id=excluded.event_id,
                 raw_payload=excluded.raw_payload,
                 kafka_key=excluded.kafka_key,
@@ -288,6 +312,7 @@ class SQLiteDeviceStateRepository:
                 heartbeat.generated_at,
                 last_seen_at,
                 int(stale_notified),
+                int(status_alert_notified),
                 heartbeat.event_id,
                 heartbeat.raw_text,
                 heartbeat.key,
@@ -297,6 +322,31 @@ class SQLiteDeviceStateRepository:
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
+        self._connection.commit()
+
+    def mark_status_alert(self, device_id: str, notified: bool) -> None:
+        """장비의 비정상 상태 경고 등록 여부를 SQLite에 기록한다.
+
+        입력:
+            device_id: 갱신할 고유 장비 ID.
+            notified: 경고가 알림 큐에 등록된 상태인지 여부.
+        반환:
+            없음.
+        """
+        cursor = self._connection.execute(
+            """
+            UPDATE device_states
+            SET status_alert_notified = ?, updated_at = ?
+            WHERE device_id = ?
+            """,
+            (
+                int(notified),
+                datetime.now(timezone.utc).isoformat(),
+                device_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(f"Unknown device: {device_id}")
         self._connection.commit()
 
     def mark_stale(self, device_id: str) -> None:

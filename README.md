@@ -1,8 +1,8 @@
 # Kafka Heartbeat SMTP Notifier
 
 Kafka heartbeat 메시지를 consume하여 SMTP 이메일로 전달하는 작은 Python 서비스입니다.
-메일 발송에 성공한 뒤에만 Kafka offset을 commit하며, 발송 실패 시 같은 메시지를 5초
-간격으로 재시도합니다.
+알림을 SQLite 영속 큐에 저장한 뒤 Kafka offset을 commit하며, SMTP 발송 실패 시 설정된
+지수형 간격으로 재시도합니다.
 
 ## 실행
 
@@ -49,6 +49,35 @@ consumer는 Kafka record key와 CloudEvent의 `data.sourceInfo.instanceId`를 �
 큰 값을 미수신 기준으로 사용합니다. 한 번 이상 수신한 장비는 SQLite에 저장되므로
 프로세스를 재시작해도 마지막 수신 시각, 상태, 미수신 알림 여부가 유지됩니다. 아직
 한 번도 메시지를 받지 않은 장비까지 감시하려면 별도의 전체 장비 목록이 필요합니다.
+
+## Oracle MES 장비 상태 조건
+
+이미지 수집기 경고는 heartbeat의 `device_id`와 Oracle 조회 결과의 `EQP_ID`가 정확히
+일치하고 `MAIN_STAT_CD`가 `STAB` 또는 `NECK`일 때만 발송합니다. 이 조건은 비정상
+`ALERT`, heartbeat 미수신 `MISSING`, 복구 `RECOVERY`에 모두 적용됩니다. 최초 경고가
+MES 조건으로 억제되었다면 이후 복구 메일도 발송하지 않습니다.
+
+Oracle 조회는 Kafka consumer와 별도 thread에서 기본 30초마다 실행하며 결과를 메모리에
+캐시합니다. 따라서 Oracle 응답을 기다리느라 Kafka 소비가 지연되지 않습니다. Oracle
+조회가 실패하거나 heartbeat 장비 ID에 해당하는 `EQP_ID`가 없으면 경고 로그를 남기고
+해당 장비의 메일 알림을 보류합니다. 실패 전 캐시는 알림 판정에 재사용하지 않습니다.
+
+```env
+ORACLE_DSN=oracle.example.com:1521/service-name
+ORACLE_USER=replace-me
+ORACLE_PASSWORD=replace-me
+ORACLE_STATUS_QUERY=select eqp_id, main_stat_cd from REPLACE_WITH_STATUS_TABLE
+ORACLE_REFRESH_SECONDS=30
+ORACLE_CACHE_MAX_AGE_SECONDS=90
+ORACLE_CALL_TIMEOUT_MS=5000
+ORACLE_ALERT_STATUS_CODES=STAB,NECK
+```
+
+`ORACLE_STATUS_QUERY`에는 반드시 첫 번째 컬럼으로 `EQP_ID`, 두 번째 컬럼으로
+`MAIN_STAT_CD`를 반환하는 조회 SQL을 넣어야 합니다. SQL 끝의 세미콜론은 있어도
+제거한 뒤 실행합니다. Oracle 계정에는 해당 테이블 또는 View의 `SELECT` 권한만
+부여하면 됩니다. `python-oracledb`의 기본 Thin 모드를 사용하므로 컨테이너에 Oracle
+Instant Client를 별도로 설치할 필요가 없습니다.
 
 SQLite 접근은 `DeviceStateRepository` 경계 뒤에 분리되어 있습니다. 이후 PostgreSQL로
 전환할 때 동일 메서드를 구현하는 저장소를 추가하고 consumer에 주입하면 됩니다.
@@ -108,9 +137,10 @@ ConfigMap의 `envFrom`, 인증정보는 Secret의 `envFrom`을 통해 환경변�
 애플리케이션은 환경변수를 직접 읽으므로 Pod 실행 명령으로 설정을 전달하거나 `.env`
 파일을 이미지에 포함할 필요가 없습니다.
 
-1. `k8s/configmap.yaml`의 Kafka/SMTP 주소와 수신자를 수정합니다.
+1. `k8s/configmap.yaml`의 Kafka/SMTP/Oracle 주소, Oracle 조회 SQL과 수신자를 수정합니다.
 2. `k8s/secret.example.yaml`을 실제 Secret 관리 방식에 맞게 적용합니다. 실제 비밀번호가
-   들어간 Secret YAML은 Git에 커밋하지 마세요.
+   들어간 Secret YAML은 Git에 커밋하지 마세요. Oracle 계정과 비밀번호도 Secret으로
+   주입합니다.
 3. `k8s/deployment.yaml`의 `REPLACE_WITH_IMAGE`를 빌드·배포한 이미지로 바꿉니다.
 4. 다음 순서로 적용합니다.
 

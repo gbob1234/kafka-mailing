@@ -40,10 +40,32 @@ class RecordingStateRepository:
     def __init__(self) -> None:
         """빈 장비 ID 목록을 준비한다."""
         self.marked: list[str] = []
+        self.saved = []
+
+    def save(self, **kwargs) -> None:
+        """저장 요청 인자를 테스트 검증용으로 기록한다."""
+        self.saved.append(kwargs)
 
     def mark_stale(self, device_id: str) -> None:
         """미수신으로 표시된 장비 ID를 기록한다."""
         self.marked.append(device_id)
+
+
+class FakeEquipmentStatusProvider:
+    """고정 MES 상태 판정 결과를 반환하는 대역."""
+
+    def __init__(self, allowed: bool = True, status: str = "STAB") -> None:
+        """알림 허용 여부와 MAIN_STAT_CD를 저장한다."""
+        self.allowed = allowed
+        self.status = status
+
+    def alert_decision(self, device_id: str):
+        """설정된 장비 상태 판정 결과를 반환한다."""
+        return SimpleNamespace(
+            allowed=self.allowed,
+            status_code=self.status,
+            reason="test",
+        )
 
 
 class FakeTopicMetadata:
@@ -114,6 +136,16 @@ class FakeBrokenConsumer(FakeHealthyConsumer):
         raise RuntimeError("broker unavailable")
 
 
+class FakeCommitConsumer:
+    """처리 완료 offset commit 호출을 기록하는 consumer 대역."""
+
+    def __init__(self) -> None:
+        self.commits = []
+
+    def commit(self, message, asynchronous):
+        self.commits.append((message, asynchronous))
+
+
 class RunnerSafetyTest(unittest.TestCase):
     """poll 지연 및 backlog 상황의 미수신 오판 방지 동작을 검증한다."""
 
@@ -142,6 +174,7 @@ class RunnerSafetyTest(unittest.TestCase):
         notifier._kafka_health_reason = "정상"
         notifier._notification_repository = RecordingNotificationRepository()
         notifier._state_repository = RecordingStateRepository()
+        notifier._equipment_status = FakeEquipmentStatusProvider()
         heartbeat = HeartbeatMessage.from_kafka_record(
             FakeRecord(cloud_event())
         )
@@ -186,6 +219,56 @@ class RunnerSafetyTest(unittest.TestCase):
         self.assertFalse(notifier._kafka_healthy)
         self.assertEqual([], notifier._notification_repository.calls)
         self.assertEqual([], notifier._state_repository.marked)
+
+    def test_inactive_mes_status_suppresses_device_notification(self) -> None:
+        """MES 상태가 STAB/NECK가 아니면 미수신 알림을 등록하지 않는다."""
+        notifier = self._notifier()
+        notifier._equipment_status = FakeEquipmentStatusProvider(
+            allowed=False,
+            status="IDLE",
+        )
+
+        notifier._notify_stale_devices()
+
+        self.assertEqual([], notifier._notification_repository.calls)
+        self.assertEqual([], notifier._state_repository.marked)
+
+    def test_alert_is_sent_when_equipment_later_enters_stab(self) -> None:
+        """억제됐던 비정상 상태는 MES가 STAB이 되면 다음 heartbeat에서 알린다."""
+        notifier = self._notifier()
+        notifier._consumer = FakeCommitConsumer()
+        notifier._equipment_status = FakeEquipmentStatusProvider(
+            allowed=True,
+            status="STAB",
+        )
+
+        notifier._process(FakeRecord(cloud_event()))
+
+        self.assertEqual(
+            [("DEVICE-001", "ALERT")],
+            notifier._notification_repository.calls,
+        )
+        self.assertTrue(notifier._devices["DEVICE-001"].status_alert_notified)
+
+    def test_recovery_is_not_sent_after_suppressed_alert(self) -> None:
+        """최초 경고를 보내지 않았다면 UP 전환에도 복구 메일을 보내지 않는다."""
+        notifier = self._notifier()
+        notifier._consumer = FakeCommitConsumer()
+        notifier._equipment_status = FakeEquipmentStatusProvider(
+            allowed=True,
+            status="STAB",
+        )
+        payload = cloud_event()
+        payload["data"]["status"] = {
+            "level": "UP",
+            "code": "OK",
+            "message": "running",
+        }
+
+        notifier._process(FakeRecord(payload))
+
+        self.assertEqual([], notifier._notification_repository.calls)
+        self.assertFalse(notifier._devices["DEVICE-001"].status_alert_notified)
 
     def test_backlog_and_recovery_stabilization_block_stale_checks(self) -> None:
         """lag 해소와 안정화가 끝날 때까지 미수신 판정을 막는지 확인한다."""
