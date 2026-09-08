@@ -10,6 +10,7 @@ from .config import Settings
 
 
 logger = logging.getLogger(__name__)
+_oracle_init_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -198,13 +199,23 @@ class OracleEquipmentStatusCache:
 
 
 def _oracle_connect(**kwargs: Any) -> Any:
-    """python-oracledb Thin 모드로 Oracle 연결을 생성한다.
+    """Oracle Client를 초기화한 뒤 Thick 모드로 Oracle 연결을 생성한다.
 
     입력:
         kwargs: ``user``, ``password``, ``dsn`` 접속 인자.
     반환:
         context manager를 지원하는 Oracle connection.
+    예외:
+        Oracle Client 로딩/초기화 또는 접속 실패는 호출자에게 전달한다.
+        Thin 모드로 우회하지 않으며, 캐시 갱신 측에서 로그와 알림 보류로 처리한다.
     """
     import oracledb
+
+    # 입력: 없음. 최초 연결 전에 프로세스의 Thick 모드를 활성화한다.
+    # Linux는 Python 기동 전에 ldconfig 또는 LD_LIBRARY_PATH로 Client를 검색 가능하게 해야 한다.
+    with _oracle_init_lock:
+        if oracledb.is_thin_mode():
+            oracledb.init_oracle_client()
+            logger.info("Oracle Client 초기화 완료: Thick 모드를 사용합니다.")
 
     return oracledb.connect(**kwargs)

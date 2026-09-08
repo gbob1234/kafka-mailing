@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
-from heartbeat_mailer.equipment_status import OracleEquipmentStatusCache
+from heartbeat_mailer.equipment_status import OracleEquipmentStatusCache, _oracle_connect
 
 
 class FakeCursor:
@@ -60,6 +61,33 @@ def settings():
 
 class OracleEquipmentStatusCacheTest(unittest.TestCase):
     """Oracle 조회 결과에 따른 장비 알림 허용 정책을 검증한다."""
+
+    def test_thick_initialization_precedes_connection_and_runs_once(self) -> None:
+        """입력: Oracle 모듈 대역. 반환: 없음. 초기화 순서와 재접속 시 중복 방지를 검증한다."""
+        driver = Mock()
+        driver.is_thin_mode.side_effect = [True, False]
+        calls = []
+        driver.init_oracle_client.side_effect = lambda: calls.append('init')
+        driver.connect.side_effect = lambda **kwargs: calls.append('connect') or 'connection'
+        with patch.dict('sys.modules', {'oracledb': driver}):
+            self.assertEqual('connection', _oracle_connect(user='u', password='p', dsn='d'))
+            _oracle_connect(user='u', password='p', dsn='d')
+        self.assertEqual(['init', 'connect', 'connect'], calls)
+        driver.init_oracle_client.assert_called_once_with()
+        driver.connect.assert_called_with(user='u', password='p', dsn='d')
+
+    def test_thick_initialization_failure_suppresses_alerts_without_connect(self) -> None:
+        """입력: Client 로딩 실패 대역. 반환: 없음. Thin 우회 없이 로그와 알림 보류를 검증한다."""
+        driver = Mock()
+        driver.is_thin_mode.return_value = True
+        driver.init_oracle_client.side_effect = RuntimeError('DPI-1047: Oracle Client unavailable')
+        cache = OracleEquipmentStatusCache(settings())
+        with patch.dict('sys.modules', {'oracledb': driver}):
+            with self.assertLogs('heartbeat_mailer.equipment_status', level='ERROR') as logs:
+                self.assertFalse(cache.refresh_once())
+        self.assertIn('DPI-1047', '\n'.join(logs.output))
+        driver.connect.assert_not_called()
+        self.assertFalse(cache.alert_decision('EQP-001').allowed)
 
     def test_only_stab_and_neck_allow_notifications(self) -> None:
         """STAB/NECK만 허용하고 IDLE과 미등록 장비는 보류한다."""

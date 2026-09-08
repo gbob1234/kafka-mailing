@@ -81,8 +81,21 @@ ORACLE_ALERT_STATUS_CODES=STAB,NECK
 `ORACLE_STATUS_QUERY`에는 반드시 첫 번째 컬럼으로 `EQP_ID`, 두 번째 컬럼으로
 `MAIN_STAT_CD`를 반환하는 조회 SQL을 넣어야 합니다. SQL 끝의 세미콜론은 있어도
 제거한 뒤 실행합니다. Oracle 계정에는 해당 테이블 또는 View의 `SELECT` 권한만
-부여하면 됩니다. `python-oracledb`의 기본 Thin 모드를 사용하므로 컨테이너에 Oracle
-Instant Client를 별도로 설치할 필요가 없습니다.
+부여하면 됩니다. Oracle 연결 전 `oracledb.init_oracle_client()`를 호출하여 **Thick 모드**를
+사용합니다. 초기화는 프로세스 내에서 직렬화하며, 이미 Thick 모드이면 다시 초기화하지 않습니다.
+Client 로딩 실패 시 Thin 모드로 우회하지 않고 조회 실패 로그를 남기며 알림을 보류합니다.
+
+**배포 전제:** 실행 환경에 Python과 아키텍처가 맞는 Oracle Instant Client Basic과 필요한
+OS 라이브러리가 설치되어 있어야 합니다. 운영 이미지에 Client 설치와 검색 경로 설정을
+이미 완료했다면 이미지 설정을 추가로 변경할 필요 없이 수정된 코드를 반영하면 됩니다.
+저장소의 기본 Dockerfile 자체에는 Instant Client 설치 단계가 없으므로 새 환경에서는
+Client가 준비된 운영 이미지 구성을 유지하세요. Client가 없으면 `DPI-1047` 오류가 발생할 수 있습니다.
+Linux에서는 `lib_dir`를 넘기지 않고, Python 시작 전에 `ldconfig` 또는 `LD_LIBRARY_PATH`로
+라이브러리 검색 경로를 설정하세요. 예를 들어 `/opt/oracle/instantclient`에 설치했다면 이미지의
+`ENV LD_LIBRARY_PATH=/opt/oracle/instantclient`로 지정할 수 있습니다. 경로 설정만으로 Client가
+설치되는 것은 아닙니다. Windows에서는 Client 디렉터리를 Python 실행 전 `PATH`에 포함하세요.
+API와 PostgreSQL schema init 프로세스는 Oracle에 연결하지 않으므로 Client를 초기화하지 않습니다.
+[Oracle Client 초기화 공식 문서](https://python-oracledb.readthedocs.io/en/stable/user_guide/initialization.html)를 참고하세요.
 
 저장소는 `heartbeat_mailer/postgres.py`에 분리되어 있으며 API와 consumer가 동일 DB를 사용합니다.
 MES Oracle은 읽기 전용 조회 대상으로 유지하며, 모니터링 DB와 별개입니다.
