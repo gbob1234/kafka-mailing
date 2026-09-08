@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from types import ModuleType
 import time
 import unittest
+from dataclasses import replace
 
 from heartbeat_mailer.message import HeartbeatMessage
 
@@ -154,22 +155,20 @@ class RunnerSafetyTest(unittest.TestCase):
         notifier = HeartbeatNotifier.__new__(HeartbeatNotifier)
         notifier._settings = SimpleNamespace(
             kafka_poll_delay_guard_seconds=10.0,
-            stale_guard_recovery_seconds=30.0,
             heartbeat_stale_after_seconds=180.0,
             kafka_health_check_interval_seconds=10.0,
             kafka_health_check_timeout_seconds=3.0,
             kafka_health_max_age_seconds=30.0,
-            kafka_recovery_stabilization_seconds=30.0,
             kafka_topic="healthcheck",
             kafka_auto_offset_reset="latest",
         )
         notifier._last_poll_completed_at = time.monotonic()
-        notifier._stale_suppressed_until = 0.0
+        notifier._catchup_targets = {}
+        notifier._assigned_keys = {("healthcheck", 0)}
         notifier._last_stale_guard_log_at = 0.0
         notifier._last_kafka_health_check_at = 0.0
         notifier._last_kafka_health_success_at = time.monotonic()
         notifier._kafka_healthy = True
-        notifier._kafka_ready_at = 0.0
         notifier._last_known_lag = 0
         notifier._kafka_health_reason = "정상"
         notifier._notification_repository = RecordingNotificationRepository()
@@ -187,21 +186,21 @@ class RunnerSafetyTest(unittest.TestCase):
         }
         return notifier
 
-    def test_poll_delay_starts_stale_guard(self) -> None:
-        """긴 poll 간격이 미수신 판정 보류 시간을 설정하는지 확인한다."""
+    def test_poll_delay_does_not_block_stale_check(self) -> None:
+        """poll 지연은 로그만 남기고 정상 연결에서 미수신 경고를 허용한다."""
         notifier = self._notifier()
         notifier._last_poll_completed_at = time.monotonic() - 20
         notifier._observe_poll_delay()
-        self.assertGreater(notifier._stale_suppressed_until, time.monotonic())
+        self.assertIsNone(notifier._stale_block_reason(time.monotonic()))
 
-    def test_stale_notification_waits_until_guard_expires(self) -> None:
-        """보류 중에는 미수신을 등록하지 않고 종료 후에만 등록하는지 확인한다."""
+    def test_stale_notification_waits_until_snapshot_consumed(self) -> None:
+        """시작 목표 처리 전에는 보류하고 처리 뒤에는 바로 경고한다."""
         notifier = self._notifier()
-        notifier._stale_suppressed_until = time.monotonic() + 30
+        notifier._catchup_targets = {("healthcheck", 0): 120}
         notifier._notify_stale_devices()
         self.assertEqual([], notifier._notification_repository.calls)
 
-        notifier._stale_suppressed_until = 0
+        notifier._catchup_targets = {}
         notifier._notify_stale_devices()
         self.assertEqual(
             [("DEVICE-001", "MISSING")],
@@ -270,21 +269,105 @@ class RunnerSafetyTest(unittest.TestCase):
         self.assertEqual([], notifier._notification_repository.calls)
         self.assertFalse(notifier._devices["DEVICE-001"].status_alert_notified)
 
-    def test_backlog_and_recovery_stabilization_block_stale_checks(self) -> None:
-        """lag 해소와 안정화가 끝날 때까지 미수신 판정을 막는지 확인한다."""
+    def test_recovery_snapshot_does_not_follow_new_messages(self) -> None:
+        """복구 목표 도달 시 새 메시지의 lag가 남아도 판정을 재개한다."""
         notifier = self._notifier()
+        notifier._mark_kafka_unhealthy("connection lost")
         notifier._consumer = FakeHealthyConsumer(high=120)
         notifier._refresh_kafka_health(force=True)
         self.assertEqual(20, notifier._last_known_lag)
         self.assertIn("backlog", notifier._stale_block_reason(time.monotonic()))
 
-        notifier._consumer.high = 100
+        notifier._consumer.high = 140
+        notifier._consumer.position_value.offset = 120
         notifier._refresh_kafka_health(force=True)
-        self.assertEqual(0, notifier._last_known_lag)
-        self.assertIn("안정화", notifier._stale_block_reason(time.monotonic()))
-
-        notifier._kafka_ready_at = 0.0
+        self.assertEqual(20, notifier._last_known_lag)
         self.assertIsNone(notifier._stale_block_reason(time.monotonic()))
+
+    def test_normal_lag_does_not_block_notifications(self) -> None:
+        """평상시 지속 lag도 미수신 경고를 막지 않는다."""
+        notifier = self._notifier()
+        notifier._consumer = FakeHealthyConsumer(high=10000)
+        notifier._refresh_kafka_health(force=True)
+        notifier._notify_stale_devices()
+        self.assertEqual([("DEVICE-001", "MISSING")], notifier._notification_repository.calls)
+
+    def test_startup_and_second_disconnect_create_new_snapshots(self) -> None:
+        """시작 목표는 고정하고 재단절 뒤 새 목표를 확보한다."""
+        notifier = self._notifier()
+        notifier._kafka_healthy = False
+        notifier._catchup_targets = None
+        notifier._consumer = FakeHealthyConsumer(high=120)
+        notifier._refresh_kafka_health(force=True)
+        notifier._consumer.high = 200
+        notifier._refresh_kafka_health(force=True)
+        self.assertEqual({("healthcheck", 0): 120}, notifier._catchup_targets)
+        notifier._mark_kafka_unhealthy("second disconnect")
+        notifier._refresh_kafka_health(force=True)
+        self.assertEqual({("healthcheck", 0): 200}, notifier._catchup_targets)
+
+    def test_monitor_threshold_ignores_producer_interval(self) -> None:
+        """producer interval이 커도 모니터링의 180초 기준만 사용한다."""
+        notifier = self._notifier()
+        state = notifier._devices["DEVICE-001"]
+        state.heartbeat = replace(state.heartbeat, interval_seconds=600)
+        state.last_seen_at = time.time() - 179
+        notifier._notify_stale_devices()
+        self.assertEqual([], notifier._notification_repository.calls)
+        state.last_seen_at = time.time() - 181
+        notifier._notify_stale_devices()
+        notifier._notify_stale_devices()
+        self.assertEqual([("DEVICE-001", "MISSING")], notifier._notification_repository.calls)
+
+    def test_all_partition_targets_must_complete(self) -> None:
+        """파티션 하나가 밀려 있으면 다른 파티션이 완료해도 보류한다."""
+        notifier = self._notifier()
+        notifier._mark_kafka_unhealthy("startup")
+        consumer = FakeHealthyConsumer()
+        first, second = FakePosition(90), FakePosition(40)
+        second.partition = 1
+        consumer.assignment = lambda: [first, second]
+        consumer.position = lambda assignment: [first, second]
+        consumer.get_watermark_offsets = lambda position, **kwargs: (
+            0, 100 if position.partition == 0 else 50
+        )
+        notifier._consumer = consumer
+        notifier._refresh_kafka_health(force=True)
+        first.offset = 100
+        notifier._refresh_kafka_health(force=True)
+        self.assertEqual({("healthcheck", 1): 50}, notifier._catchup_targets)
+        second.offset = 50
+        notifier._refresh_kafka_health(force=True)
+        self.assertIsNone(notifier._stale_block_reason(time.monotonic()))
+
+    def test_assignment_change_resets_completed_gate(self) -> None:
+        """동일 파티션 재할당도 새 목표를 확보할 때까지 미수신을 보류한다."""
+        notifier = self._notifier()
+        notifier._on_assignment_change(None, [])
+        self.assertIsNone(notifier._catchup_targets)
+        self.assertFalse(notifier._kafka_healthy)
+
+    def test_late_receipt_logs_gap_without_retroactive_missing(self) -> None:
+        """미경고 공백을 뒤늦게 발견하면 로그만 기록한다."""
+        notifier = self._notifier()
+        notifier._consumer = FakeCommitConsumer()
+        payload = cloud_event()
+        payload["data"]["status"]["level"] = "UP"
+        with self.assertLogs("heartbeat_mailer.runner", level="WARNING") as logs:
+            notifier._process(FakeRecord(payload))
+        self.assertIn("수신 공백", " ".join(logs.output))
+        self.assertEqual([], notifier._notification_repository.calls)
+
+    def test_warn_receipt_after_missing_is_not_up_recovery(self) -> None:
+        """WARN 메시지도 수신 재개이며 UP 복구로 표현하지 않는다."""
+        notifier = self._notifier()
+        notifier._consumer = FakeCommitConsumer()
+        state = notifier._devices["DEVICE-001"]
+        state.stale_notified = True
+        state.status_alert_notified = True
+        notifier._process(FakeRecord(cloud_event()))
+        self.assertEqual([("DEVICE-001", "RECEIVING")], notifier._notification_repository.calls)
+        self.assertFalse(notifier._devices["DEVICE-001"].stale_notified)
 
     def test_invalid_position_uses_committed_group_offset(self) -> None:
         """현재 position 미확인 시 저장된 group offset으로 lag를 계산한다."""

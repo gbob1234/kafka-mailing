@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from heartbeat_mailer.mailer import SmtpMailer
+from heartbeat_mailer.mailer import SmtpMailer, _presentation
 from heartbeat_mailer.message import HeartbeatMessage
 from tests.test_message import FakeRecord, cloud_event
 
@@ -37,6 +37,12 @@ class FakePlainSmtp:
 
 class SmtpMailerTest(unittest.TestCase):
     """plain SMTP와 Outlook 호환 수집기 알림 본문을 검증한다."""
+
+    def test_receiving_is_not_up_recovery(self) -> None:
+        """수신 재개 안내는 수집기 정상 복구를 단정하지 않는다."""
+        presentation = _presentation("RECEIVING")
+        self.assertIn("수신 재개", presentation["label"])
+        self.assertNotIn("UP", presentation["summary"])
 
     def test_uses_plain_smtp_without_tls_or_auth(self) -> None:
         """SMTP 생성과 send_message 외 메서드가 필요하지 않은지 확인한다."""

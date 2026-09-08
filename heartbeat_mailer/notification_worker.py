@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from contextlib import nullcontext
 
 from .config import Settings
 from .mailer import SmtpMailer
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class MailNotificationWorker:
-    """SQLite 알림 큐를 읽어 Kafka 소비와 독립적으로 SMTP를 발송한다."""
+    """영속 알림 큐를 읽어 Kafka 소비와 독립적으로 SMTP를 발송한다."""
 
     def __init__(
         self,
@@ -77,9 +78,15 @@ class MailNotificationWorker:
             return False
 
         try:
-            self._mailer.send_heartbeat(
-                job.heartbeat, job.notification_type, job.detail
-            )
+            guard = getattr(self._repository, 'delivery_guard', None)
+            with guard(job) if guard else nullcontext(True) as allowed:
+                if not allowed:
+                    logger.info("감시 제외/삭제된 메일을 취소했습니다: id=%s", job.id)
+                    return True
+                self._mailer.send_heartbeat(
+                    job.heartbeat, job.notification_type, job.detail
+                )
+                self._repository.mark_sent(job.id)
         except Exception as exc:
             attempts = job.attempt_count + 1
             dead = attempts >= self._settings.mail_max_retry_attempts
@@ -114,7 +121,6 @@ class MailNotificationWorker:
                 )
             return True
 
-        self._repository.mark_sent(job.id)
         logger.info(
             "메일 발송 완료: id=%s device=%s type=%s",
             job.id,

@@ -1,3 +1,4 @@
+# 구버전 SQLite PVC 보관용. PostgreSQL 배포에는 적용하지 않습니다.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

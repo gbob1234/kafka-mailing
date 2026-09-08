@@ -23,7 +23,7 @@ class StoredDeviceState:
 
 @dataclass(frozen=True)
 class NotificationJob:
-    """SQLite 알림 큐에서 worker가 가져온 발송 작업."""
+    """영속 알림 큐에서 worker가 가져온 발송 작업."""
 
     id: int
     dedupe_key: str
@@ -69,7 +69,7 @@ class NotificationQueueRepository(Protocol):
 
 
 class DeviceStateRepository(Protocol):
-    """SQLite와 향후 PostgreSQL 구현이 따라야 할 장비 상태 저장소 규약."""
+    """SQLite 레거시 구현과 PostgreSQL이 공유하는 장비 상태 저장소 규약."""
 
     def load_all(self) -> list[StoredDeviceState]:
         """모든 장비 상태를 불러온다.

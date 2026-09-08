@@ -3,6 +3,7 @@ kind: Deployment
 metadata:
   name: healthcheck-monitor
 spec:
+  # 공유 DB여도 consumer는 단일 실행: 파티션별 감시 소유권은 아직 없습니다.
   replicas: 1
   strategy:
     type: Recreate
@@ -14,75 +15,29 @@ spec:
       labels:
         app: healthcheck-monitor
     spec:
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 60
       securityContext:
-        fsGroup: 10001
-        fsGroupChangePolicy: Always
-        supplementalGroups:
-          - 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
       initContainers:
-        - name: prepare-sqlite-volume
+        - name: initialize-postgres
           image: REPLACE_WITH_IMAGE
-          imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -ec
-            - |
-              echo "Before permission setup:"
-              ls -ldn /data
-              chown -R 10001:10001 /data
-              chmod 0770 /data
-              echo "After permission setup:"
-              ls -ldn /data
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: false
-            runAsUser: 0
-            runAsGroup: 0
-          volumeMounts:
-            - name: state
-              mountPath: /data
-        - name: initialize-sqlite
-          image: REPLACE_WITH_IMAGE
-          imagePullPolicy: IfNotPresent
-          command:
-            - python
-            - -c
-            - |
-              import os
-              from heartbeat_mailer.storage import (
-                  SQLiteDeviceStateRepository,
-                  SQLiteNotificationQueueRepository,
-              )
-
-              path = os.environ["SQLITE_PATH"]
-              mode = os.environ.get("SQLITE_JOURNAL_MODE", "WAL")
-              print(f"Initializing SQLite: path={path}, mode={mode}")
-
-              state = SQLiteDeviceStateRepository(path, mode)
-              state.close()
-              queue = SQLiteNotificationQueueRepository(path, mode)
-              queue.close()
-              print("SQLite initialization completed")
-          envFrom:
-            - configMapRef:
-                name: healthcheck-monitor-config
+          command: ["python", "-m", "heartbeat_mailer.postgres"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: healthcheck-monitor-secret
+                  key: DATABASE_URL
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 10001
-            runAsGroup: 10001
             capabilities:
-              drop:
-                - ALL
-          volumeMounts:
-            - name: state
-              mountPath: /data
+              drop: ["ALL"]
       containers:
         - name: healthcheck-monitor
           image: REPLACE_WITH_IMAGE
-          imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
                 name: healthcheck-monitor-config
@@ -91,16 +46,66 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 10001
-            runAsGroup: 10001
             capabilities:
-              drop:
-                - ALL
-          volumeMounts:
-            - name: state
-              mountPath: /data
-      volumes:
-        - name: state
-          persistentVolumeClaim:
-            claimName: healthcheck-monitor-state
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+        - name: api
+          image: REPLACE_WITH_IMAGE
+          command: ["python", "-m", "uvicorn", "heartbeat_mailer.api:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - name: api
+              containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: healthcheck-monitor-secret
+                  key: DATABASE_URL
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: healthcheck-monitor-secret
+                  key: API_TOKEN
+            - name: HEARTBEAT_STALE_AFTER_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: healthcheck-monitor-config
+                  key: HEARTBEAT_STALE_AFTER_SECONDS
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: api
+            timeoutSeconds: 6
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: api
+            initialDelaySeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: healthcheck-monitor-api
+spec:
+  type: ClusterIP
+  selector:
+    app: healthcheck-monitor
+  ports:
+    - port: 8000
+      targetPort: api

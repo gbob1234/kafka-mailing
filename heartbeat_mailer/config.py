@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import math
 
 from dotenv import load_dotenv
 
@@ -24,7 +25,7 @@ def _required(name: str) -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    """Kafka, SMTP, 알림 및 SQLite 실행 설정을 보관하는 불변 객체."""
+    """Kafka, SMTP, Oracle, PostgreSQL 및 알림 실행 설정을 보관한다."""
     kafka_bootstrap_servers: str
     kafka_topic: str
     kafka_group_id: str
@@ -40,19 +41,15 @@ class Settings:
     smtp_to: tuple[str, ...]
     mail_subject_prefix: str
     heartbeat_stale_after_seconds: float
-    sqlite_path: str
-    sqlite_journal_mode: str
     mail_queue_poll_seconds: float
     mail_max_retry_attempts: int
     mail_retry_initial_seconds: float
     mail_retry_max_seconds: float
     kafka_lag_log_interval_seconds: float
     kafka_poll_delay_guard_seconds: float
-    stale_guard_recovery_seconds: float
     kafka_health_check_interval_seconds: float
     kafka_health_check_timeout_seconds: float
     kafka_health_max_age_seconds: float
-    kafka_recovery_stabilization_seconds: float
     oracle_dsn: str
     oracle_user: str
     oracle_password: str
@@ -61,6 +58,7 @@ class Settings:
     oracle_cache_max_age_seconds: float
     oracle_call_timeout_ms: int
     oracle_alert_status_codes: frozenset[str]
+    database_url: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -81,6 +79,7 @@ class Settings:
             if address.strip()
         )
         settings = cls(
+            database_url=_required("DATABASE_URL"),
             kafka_bootstrap_servers=_required("KAFKA_BOOTSTRAP_SERVERS"),
             kafka_topic=_required("KAFKA_TOPIC"),
             kafka_group_id=os.getenv(
@@ -110,12 +109,6 @@ class Settings:
             heartbeat_stale_after_seconds=float(
                 os.getenv("HEARTBEAT_STALE_AFTER_SECONDS", "180")
             ),
-            sqlite_path=os.getenv(
-                "SQLITE_PATH", "heartbeat_state.db"
-            ).strip(),
-            sqlite_journal_mode=os.getenv(
-                "SQLITE_JOURNAL_MODE", "WAL"
-            ).strip().upper(),
             mail_queue_poll_seconds=float(
                 os.getenv("MAIL_QUEUE_POLL_SECONDS", "1")
             ),
@@ -134,9 +127,6 @@ class Settings:
             kafka_poll_delay_guard_seconds=float(
                 os.getenv("KAFKA_POLL_DELAY_GUARD_SECONDS", "10")
             ),
-            stale_guard_recovery_seconds=float(
-                os.getenv("STALE_GUARD_RECOVERY_SECONDS", "30")
-            ),
             kafka_health_check_interval_seconds=float(
                 os.getenv("KAFKA_HEALTH_CHECK_INTERVAL_SECONDS", "10")
             ),
@@ -145,9 +135,6 @@ class Settings:
             ),
             kafka_health_max_age_seconds=float(
                 os.getenv("KAFKA_HEALTH_MAX_AGE_SECONDS", "30")
-            ),
-            kafka_recovery_stabilization_seconds=float(
-                os.getenv("KAFKA_RECOVERY_STABILIZATION_SECONDS", "30")
             ),
             oracle_dsn=_required("ORACLE_DSN"),
             oracle_user=_required("ORACLE_USER"),
@@ -174,12 +161,8 @@ class Settings:
             raise ValueError("KAFKA_SECURITY_PROTOCOL must be SASL_SSL")
         if not settings.smtp_to:
             raise ValueError("SMTP_TO must contain at least one email address")
-        if settings.heartbeat_stale_after_seconds <= 0:
+        if not math.isfinite(settings.heartbeat_stale_after_seconds) or settings.heartbeat_stale_after_seconds <= 0:
             raise ValueError("HEARTBEAT_STALE_AFTER_SECONDS must be positive")
-        if not settings.sqlite_path:
-            raise ValueError("SQLITE_PATH cannot be empty")
-        if settings.sqlite_journal_mode not in {"WAL", "DELETE"}:
-            raise ValueError("SQLITE_JOURNAL_MODE must be WAL or DELETE")
         if settings.mail_queue_poll_seconds <= 0:
             raise ValueError("MAIL_QUEUE_POLL_SECONDS must be positive")
         if settings.mail_max_retry_attempts <= 0:
@@ -195,8 +178,6 @@ class Settings:
             raise ValueError("KAFKA_LAG_LOG_INTERVAL_SECONDS must be positive")
         if settings.kafka_poll_delay_guard_seconds <= 0:
             raise ValueError("KAFKA_POLL_DELAY_GUARD_SECONDS must be positive")
-        if settings.stale_guard_recovery_seconds <= 0:
-            raise ValueError("STALE_GUARD_RECOVERY_SECONDS must be positive")
         if settings.kafka_health_check_interval_seconds <= 0:
             raise ValueError("KAFKA_HEALTH_CHECK_INTERVAL_SECONDS must be positive")
         if settings.kafka_health_check_timeout_seconds <= 0:
@@ -208,10 +189,6 @@ class Settings:
             raise ValueError(
                 "KAFKA_HEALTH_MAX_AGE_SECONDS must be greater than or equal "
                 "to KAFKA_HEALTH_CHECK_INTERVAL_SECONDS"
-            )
-        if settings.kafka_recovery_stabilization_seconds <= 0:
-            raise ValueError(
-                "KAFKA_RECOVERY_STABILIZATION_SECONDS must be positive"
             )
         if settings.oracle_refresh_seconds <= 0:
             raise ValueError("ORACLE_REFRESH_SECONDS must be positive")

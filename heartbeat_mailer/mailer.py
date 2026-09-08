@@ -87,6 +87,14 @@ def _presentation(notification: str) -> dict[str, str]:
         제목, 안내 문구, 강조색과 배경색을 포함한 문자열 사전.
     """
     values = {
+        "RECEIVING": {
+            "label": "수집기 수신 재개",
+            "title": "수집기 Heartbeat 수신이 재개되었습니다",
+            "summary": "통신 수신이 재개되었습니다. 수집기 보고 상태는 아래에서 확인해 주세요.",
+            "color": "#175CD3",
+            "soft_color": "#EFF8FF",
+            "border_color": "#B2DDFF",
+        },
         "ALERT": {
             "label": "수집기 경고",
             "title": "수집기 상태 확인이 필요합니다",

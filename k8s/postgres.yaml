@@ -1,0 +1,77 @@
+# PostgreSQL은 애플리케이션과 별도 Pod/PVC를 사용합니다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: healthcheck-postgres-headless
+spec:
+  clusterIP: None
+  selector:
+    app: healthcheck-postgres
+  ports:
+    - port: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: healthcheck-postgres
+spec:
+  type: ClusterIP
+  selector:
+    app: healthcheck-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: healthcheck-postgres
+spec:
+  serviceName: healthcheck-postgres-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: healthcheck-postgres
+  template:
+    metadata:
+      labels:
+        app: healthcheck-postgres
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: postgres
+          image: postgres:17-bookworm
+          envFrom:
+            - secretRef:
+                name: healthcheck-postgres-secret
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # 필요하면 PowerStore block CSI StorageClass를 지정하세요.
+        # storageClassName: REPLACE_WITH_STORAGE_CLASS
+        resources:
+          requests:
+            storage: 5Gi

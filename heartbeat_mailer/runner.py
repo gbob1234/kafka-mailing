@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 import signal
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from types import FrameType
 
-from confluent_kafka import Consumer, KafkaError, Message
+from confluent_kafka import Consumer, KafkaError, KafkaException, Message
 
 from .config import Settings
 from .message import HeartbeatMessage, InvalidHeartbeat
@@ -18,8 +19,6 @@ from .equipment_status import (
 from .storage import (
     DeviceStateRepository,
     NotificationQueueRepository,
-    SQLiteDeviceStateRepository,
-    SQLiteNotificationQueueRepository,
 )
 
 
@@ -51,9 +50,9 @@ class HeartbeatNotifier:
         """Kafka consumer와 상태 저장소를 초기화하고 기존 상태를 복원한다.
 
         입력:
-            settings: Kafka, SMTP, SQLite 및 알림 기준 설정.
-            state_repository: 테스트나 PostgreSQL 전환 시 주입할 저장소.
-                지정하지 않으면 설정된 경로의 SQLite 저장소를 생성한다.
+            settings: Kafka, SMTP, PostgreSQL 및 알림 기준 설정.
+            state_repository: 테스트에서 주입할 저장소.
+                지정하지 않으면 DATABASE_URL의 PostgreSQL 저장소를 생성한다.
             notification_repository: consumer가 알림을 등록할 영속 큐 저장소.
             notification_worker: 테스트에서 주입할 별도 SMTP worker.
             equipment_status_provider: MES 상태 조회 구현. 없으면 Oracle 캐시를 생성한다.
@@ -61,7 +60,7 @@ class HeartbeatNotifier:
             없음.
         예외:
             KafkaException: Kafka consumer 설정이 유효하지 않은 경우.
-            sqlite3.Error: SQLite 연결 또는 초기 스키마 생성에 실패한 경우.
+            psycopg.Error: PostgreSQL 연결 또는 초기 스키마 생성에 실패한 경우.
         """
         self._settings = settings
         consumer_config = {
@@ -77,39 +76,30 @@ class HeartbeatNotifier:
         if settings.kafka_ssl_ca_location:
             consumer_config["ssl.ca.location"] = settings.kafka_ssl_ca_location
         self._consumer = Consumer(consumer_config)
-        self._state_repository = state_repository or SQLiteDeviceStateRepository(
-            settings.sqlite_path,
-            settings.sqlite_journal_mode,
-        )
-        self._notification_repository = (
-            notification_repository
-            or SQLiteNotificationQueueRepository(
-                settings.sqlite_path,
-                settings.sqlite_journal_mode,
-            )
-        )
+        from .postgres import PostgresRepository
+        if state_repository is None:
+            state_repository = PostgresRepository(settings.database_url)
+            state_repository.initialize()
+            state_repository.recover_jobs()
+        self._state_repository = state_repository
+        self._notification_repository = notification_repository or state_repository
         self._notification_worker = notification_worker or MailNotificationWorker(
             settings,
-            SQLiteNotificationQueueRepository(
-                settings.sqlite_path,
-                settings.sqlite_journal_mode,
-            ),
+            PostgresRepository(settings.database_url),
         )
         self._equipment_status = (
             equipment_status_provider or OracleEquipmentStatusCache(settings)
         )
         self._running = True
         self._last_poll_completed_at = time.monotonic()
-        self._stale_suppressed_until = (
-            self._last_poll_completed_at
-            + settings.stale_guard_recovery_seconds
-        )
+        # None이면 시작/재연결 후 목표 offset 스냅샷을 아직 확보하지 못한 상태.
+        self._catchup_targets: dict[tuple[str, int], int] | None = None
+        self._assigned_keys: set[tuple[str, int]] = set()
         self._last_stale_guard_log_at = 0.0
         self._last_lag_log_at = 0.0
         self._last_kafka_health_check_at = 0.0
         self._last_kafka_health_success_at = 0.0
         self._kafka_healthy = False
-        self._kafka_ready_at = float("inf")
         self._last_known_lag: int | None = None
         self._kafka_health_reason = "Kafka 상태 확인 전"
         self._devices: dict[str, DeviceState] = {
@@ -151,24 +141,32 @@ class HeartbeatNotifier:
         """
         signal.signal(signal.SIGINT, self.stop)
         signal.signal(signal.SIGTERM, self.stop)
-        self._consumer.subscribe([self._settings.kafka_topic])
+        self._consumer.subscribe(
+            [self._settings.kafka_topic],
+            on_assign=self._on_assignment_change,
+            on_revoke=self._on_assignment_change,
+            on_lost=self._on_assignment_change,
+        )
         self._equipment_status.start()
         self._notification_worker.start()
         logger.info("Kafka topic 구독 시작: %s", self._settings.kafka_topic)
 
         try:
             while self._running:
-                record = self._consumer.poll(timeout=1.0)
-                self._observe_poll_delay()
+                try:
+                    record = self._consumer.poll(timeout=1.0)
+                    self._observe_poll_delay()
+                    if record is not None:
+                        if record.error():
+                            self._handle_error(record)
+                            continue
+                        self._process(record)
+                except KafkaException as exc:
+                    self._mark_kafka_unhealthy(str(exc))
+                    continue
+                # poll이 반환한 메시지를 저장한 뒤 position을 읽어야 처리 완료와 일치한다.
                 self._refresh_kafka_health()
                 self._maybe_log_consumer_lag()
-                if record is None:
-                    self._notify_stale_devices()
-                    continue
-                if record.error():
-                    self._handle_error(record)
-                    continue
-                self._process(record)
                 self._notify_stale_devices()
         finally:
             self._notification_worker.stop()
@@ -179,12 +177,34 @@ class HeartbeatNotifier:
             logger.info("Kafka consumer가 종료되었습니다.")
 
     def _process(self, record: Message) -> None:
+        """입력: Kafka record. 반환: 없음. DB 상태·큐 commit 후 Kafka offset을 commit한다."""
+        with self._state_transaction():
+            self._process_state(record)
+        self._consumer.commit(message=record, asynchronous=False)
+
+    def _state_transaction(self):
+        """입력: 없음. 반환: 저장소 트랜잭션 context. 테스트 대역은 빈 context를 사용한다."""
+        transaction = getattr(self._state_repository, 'transaction', None)
+        return transaction() if transaction else nullcontext()
+
+    def _reload_managed_states(self):
+        """입력: 없음. 반환: 없음. API 변경을 DB에서 읽어 메모리와 동기화한다."""
+        if not hasattr(self._state_repository, 'transaction'):
+            return
+        self._devices = {
+            state.heartbeat.device_id: DeviceState(
+                state.heartbeat, state.last_seen_at, state.status_signature,
+                state.stale_notified, state.status_alert_notified,
+            ) for state in self._state_repository.load_all()
+        }
+
+    def _process_state(self, record: Message) -> None:
         """Kafka 메시지 한 건을 검증하고 알림·저장·commit 순서로 처리한다.
 
         입력:
             record: 처리할 confluent-kafka ``Message`` 객체.
         반환:
-            없음. 성공하면 SQLite 저장 후 해당 offset을 동기 commit한다.
+            없음. 호출자가 DB 저장 후 해당 offset을 동기 commit한다.
         처리 규칙:
             잘못된 CloudEvent는 로그 후 건너뛰며, 메일 발송이나 상태 저장이
             실패하면 정상 처리된 것으로 commit하지 않는다.
@@ -198,7 +218,6 @@ class HeartbeatNotifier:
                 record.partition(),
                 record.offset(),
             )
-            self._consumer.commit(message=record, asynchronous=False)
             return
 
         if heartbeat.key and heartbeat.key != heartbeat.device_id:
@@ -208,23 +227,31 @@ class HeartbeatNotifier:
                 heartbeat.device_id,
             )
 
+        self._reload_managed_states()
         previous = self._devices.get(heartbeat.device_id)
+        last_seen_at = time.time()
+        if previous:
+            gap = last_seen_at - previous.last_seen_at
+            if gap >= self._settings.heartbeat_stale_after_seconds:
+                logger.warning(
+                    "수집기 수신 공백 발견: device=%s gap=%.1fs threshold=%.1fs "
+                    "missing_notified=%s; 과거 미수신 경고는 소급 발송하지 않습니다.",
+                    heartbeat.device_id, gap,
+                    self._settings.heartbeat_stale_after_seconds,
+                    previous.stale_notified,
+                )
         notification: str | None = None
         detail = ""
         status_alert_notified = (
             previous.status_alert_notified if previous else False
         )
         if previous and previous.stale_notified:
-            if heartbeat.status_level == "UP":
-                notification = "RECOVERY"
-                detail = "중단되었던 heartbeat 수신이 재개되었습니다."
-            else:
-                notification = "ALERT"
-                detail = (
-                    "Heartbeat 수신은 재개되었지만 수집기가 비정상 상태를 "
-                    "보고했습니다."
-                )
-        elif heartbeat.status_level != "UP" and (
+            self._enqueue_if_equipment_active(
+                heartbeat, "RECEIVING",
+                "수집기의 Heartbeat 수신이 재개되었습니다. "
+                f"수집기 보고 상태: {heartbeat.status_level} / {heartbeat.status_code}",
+            )
+        if heartbeat.status_level != "UP" and (
             previous is None
             or previous.status_signature != heartbeat.status_signature()
             or not previous.status_alert_notified
@@ -249,7 +276,6 @@ class HeartbeatNotifier:
         if heartbeat.status_level == "UP":
             status_alert_notified = False
 
-        last_seen_at = time.time()
         state = DeviceState(
             heartbeat=heartbeat,
             last_seen_at=last_seen_at,
@@ -263,9 +289,8 @@ class HeartbeatNotifier:
             status_alert_notified=status_alert_notified,
         )
         self._devices[heartbeat.device_id] = state
-        self._consumer.commit(message=record, asynchronous=False)
         logger.info(
-            "heartbeat 처리 및 commit 완료: device=%s status=%s topic=%s "
+            "heartbeat 상태 저장: device=%s status=%s topic=%s "
             "partition=%s offset=%s",
             heartbeat.device_id,
             heartbeat.status_level,
@@ -275,12 +300,18 @@ class HeartbeatNotifier:
         )
 
     def _notify_stale_devices(self) -> None:
+        """입력: 없음. 반환: 없음. 최신 관리 설정과 함께 미수신 상태·큐를 원자적으로 저장한다."""
+        with self._state_transaction():
+            self._reload_managed_states()
+            self._notify_stale_states()
+
+    def _notify_stale_states(self) -> None:
         """마지막 수신 시각이 기준을 넘긴 장비에 미수신 알림을 보낸다.
 
         입력:
             없음. 메모리에 복원된 모든 장비 상태와 현재 시각을 사용한다.
         반환:
-            없음. 큐 등록 성공 후 메모리와 SQLite의 미수신 표시를 갱신한다.
+            없음. 큐 등록 성공 후 메모리와 DB의 미수신 표시를 갱신한다.
         """
         monotonic_now = time.monotonic()
         blocked_reason = self._stale_block_reason(monotonic_now)
@@ -293,25 +324,12 @@ class HeartbeatNotifier:
                 self._last_stale_guard_log_at = monotonic_now
             return
 
-        if monotonic_now < self._stale_suppressed_until:
-            if monotonic_now - self._last_stale_guard_log_at >= 10:
-                logger.warning(
-                    "최근 Kafka poll 지연으로 미수신 판정을 보류합니다: "
-                    "remaining=%.1fs",
-                    self._stale_suppressed_until - monotonic_now,
-                )
-                self._last_stale_guard_log_at = monotonic_now
-            return
-
         now = time.time()
         for state in self._devices.values():
             if state.stale_notified:
                 continue
             elapsed = now - state.last_seen_at
-            threshold = max(
-                self._settings.heartbeat_stale_after_seconds,
-                state.heartbeat.interval_seconds * 3,
-            )
+            threshold = self._settings.heartbeat_stale_after_seconds
             if elapsed < threshold:
                 continue
             detail = f"마지막 heartbeat 수신 후 {int(elapsed)}초가 지났습니다."
@@ -342,6 +360,9 @@ class HeartbeatNotifier:
         반환:
             MES 조건을 충족해 알림 대상으로 인정했으면 ``True``.
         """
+        allowed = getattr(self._state_repository, 'monitoring_allowed', None)
+        if allowed is not None and not allowed(heartbeat.device_id):
+            return False
         decision = self._equipment_status.alert_decision(heartbeat.device_id)
         if not decision.allowed:
             logger.debug(
@@ -378,16 +399,16 @@ class HeartbeatNotifier:
         health_age = now - self._last_kafka_health_success_at
         if health_age > self._settings.kafka_health_max_age_seconds:
             return f"Kafka 상태 확인 만료 ({health_age:.1f}초 전)"
-        if self._last_known_lag is None:
-            return "Kafka consumer lag 미확인"
-        if self._last_known_lag > 0:
-            return f"Kafka backlog 처리 중 (lag={self._last_known_lag})"
-        if now < self._kafka_ready_at:
-            return (
-                "Kafka 복구 안정화 중 "
-                f"({self._kafka_ready_at - now:.1f}초 남음)"
-            )
+        if self._catchup_targets is None:
+            return "Kafka 시작/복구 backlog 목표 확인 전"
+        if self._catchup_targets:
+            return "Kafka 시작/복구 시점 backlog 처리 중"
         return None
+
+    def _on_assignment_change(self, consumer, partitions) -> None:
+        """재할당 시 backlog 목표를 다시 확보한다. 입력: consumer/파티션, 반환: 없음."""
+        self._mark_kafka_unhealthy("consumer partition 할당 변경")
+        self._last_kafka_health_check_at = 0.0
 
     def _refresh_kafka_health(self, force: bool = False) -> None:
         """실제 broker 왕복 통신과 fresh watermark로 Kafka 상태를 갱신한다.
@@ -438,13 +459,20 @@ class HeartbeatNotifier:
                     unresolved,
                     timeout=self._settings.kafka_health_check_timeout_seconds,
                 )
+                for item in committed:
+                    if getattr(item, "error", None):
+                        raise RuntimeError(f"committed offset 조회 오류: {item.error}")
                 committed_offsets = {
                     (item.topic, item.partition): item.offset
                     for item in committed
                 }
 
             total_lag = 0
+            highs = {}
+            offsets = {}
             for position in positions:
+                if getattr(position, "error", None):
+                    raise RuntimeError(f"consumer position 조회 오류: {position.error}")
                 low, high = self._consumer.get_watermark_offsets(
                     position,
                     timeout=self._settings.kafka_health_check_timeout_seconds,
@@ -477,29 +505,40 @@ class HeartbeatNotifier:
                         effective_offset,
                     )
                 total_lag += max(0, high - effective_offset)
+                key = (position.topic, position.partition)
+                highs[key] = high
+                offsets[key] = effective_offset
         except Exception as exc:
             self._mark_kafka_unhealthy(str(exc))
             return
 
-        was_healthy = self._kafka_healthy
-        previous_lag = self._last_known_lag
+        # 성공한 전체 조회 결과만 사용하며, 정상 소비 중에는 목표를 늘리지 않는다.
+        keys = set(highs)
+        expired = (
+            now - self._last_kafka_health_success_at
+            > self._settings.kafka_health_max_age_seconds
+        )
+        if not self._kafka_healthy or expired or keys != self._assigned_keys:
+            self._catchup_targets = None
+        self._assigned_keys = keys
         self._kafka_healthy = True
         self._last_kafka_health_success_at = now
         self._last_known_lag = total_lag
         self._kafka_health_reason = "정상"
 
-        if total_lag > 0:
-            self._kafka_ready_at = float("inf")
-            return
-        if not was_healthy or previous_lag is None or previous_lag > 0:
-            self._kafka_ready_at = (
-                now + self._settings.kafka_recovery_stabilization_seconds
-            )
+        if self._catchup_targets is None:
+            self._catchup_targets = dict(highs)
             logger.info(
-                "Kafka 연결 및 backlog 해소를 확인했습니다. 안정화 후 장비 "
-                "미수신 판정을 재개합니다: stabilization=%.1fs",
-                self._settings.kafka_recovery_stabilization_seconds,
+                "Kafka 시작/복구 backlog 목표 확정: targets=%s lag=%s",
+                self._catchup_targets, total_lag,
             )
+        was_catching_up = bool(self._catchup_targets)
+        self._catchup_targets = {
+            key: target for key, target in self._catchup_targets.items()
+            if offsets[key] < target
+        }
+        if was_catching_up and not self._catchup_targets:
+            logger.info("Kafka 시작/복구 backlog 처리 완료. 미수신 판정을 재개합니다.")
 
     def _mark_kafka_unhealthy(self, reason: str) -> None:
         """Kafka를 비정상 상태로 표시하여 장비별 미수신 판정을 차단한다.
@@ -511,7 +550,7 @@ class HeartbeatNotifier:
         """
         changed = self._kafka_healthy or self._kafka_health_reason != reason
         self._kafka_healthy = False
-        self._kafka_ready_at = float("inf")
+        self._catchup_targets = None
         self._last_known_lag = None
         self._kafka_health_reason = reason
         if changed:
@@ -522,27 +561,21 @@ class HeartbeatNotifier:
             )
 
     def _observe_poll_delay(self) -> None:
-        """연속 poll 완료 간격을 측정하고 지연 시 미수신 판정을 보류한다.
+        """연속 poll 완료 간격을 측정하고 지연을 로그로 기록한다.
 
         입력:
             없음. monotonic clock의 이전 poll 완료 시각을 사용한다.
         반환:
-            없음. 기준 초과 시 보류 종료 시각을 갱신한다.
+            없음. 지연 자체로 미수신 판정을 보류하지 않는다.
         """
         now = time.monotonic()
         elapsed = now - self._last_poll_completed_at
         self._last_poll_completed_at = now
         if elapsed <= self._settings.kafka_poll_delay_guard_seconds:
             return
-        self._stale_suppressed_until = max(
-            self._stale_suppressed_until,
-            now + self._settings.stale_guard_recovery_seconds,
-        )
         logger.warning(
-            "Kafka poll 지연을 감지했습니다. 미수신 판정을 일시 보류합니다: "
-            "delay=%.1fs guard=%.1fs",
+            "Kafka poll 지연을 감지했습니다: delay=%.1fs",
             elapsed,
-            self._settings.stale_guard_recovery_seconds,
         )
 
     def _maybe_log_consumer_lag(self) -> None:
